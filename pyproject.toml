@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "a2a-coop"
+version = "0.1.0"
+description = "MCP server that lets AI agents such as Claude and Codex cooperate on goals you give them."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["mcp>=2.3,<3", "rich>=13", "textual>=8"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyflakes"]
+
+[project.scripts]
+a2a-coop = "a2a_coop.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/a2a_coop"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

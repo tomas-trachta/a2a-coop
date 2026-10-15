@@ -1,0 +1,45 @@
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass(frozen=True)
+class Agent:
+    name: str
+    role: str
+    status: str
+    activity: str
+    joined_at: float
+    last_seen: float
+
+
+@dataclass(frozen=True)
+class Goal:
+    id: int
+    title: str
+    description: str
+    status: str
+    created_at: float
+
+
+@dataclass(frozen=True)
+class Task:
+    id: int
+    goal_id: int
+    title: str
+    description: str
+    assignee: Optional[str]
+    status: str
+    result: str
+    created_by: str
+    created_at: float
+    updated_at: float
+
+
+@dataclass(frozen=True)
+class Message:
+    id: int
+    sender: str
+    recipient: str
+    body: str
+    kind: str
+    created_at: float
