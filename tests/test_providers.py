@@ -60,6 +60,21 @@ def test_custom_terminal_template():
     assert argv == ["kitty", "--directory", "/repo", "--", "run"]
 
 
+def test_windows_prefers_windows_terminal():
+    argv, where = terminal.window_command("reviewer", ["run"], Path("/repo"), env={}, platform="win32", which=lambda name: name)
+
+    assert argv[:6] == ["wt", "-w", "0", "new-tab", "--title", "reviewer"]
+    assert argv[-1] == "run"
+    assert where == "a new Windows Terminal tab"
+
+
+def test_windows_without_windows_terminal_runs_the_command_in_its_own_console():
+    argv, where = terminal.window_command("reviewer", ["run", "x y"], Path("/repo"), env={}, platform="win32", which=lambda name: None)
+
+    assert argv == ["run", "x y"]
+    assert where == "a new console window"
+
+
 def test_linux_uses_the_first_installed_terminal():
     installed = {"xterm", "kitty"}
     argv, _ = terminal.window_command(

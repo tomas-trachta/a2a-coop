@@ -23,9 +23,16 @@ def run_here(db: Path, agent: Agent, fallback_dir: Path) -> int:
     os.chdir(providers.agent_workdir(agent, fallback_dir))
 
     if sys.platform == "win32":
+        name_console(agent.name)
         return subprocess.call(command)
 
     os.execv(command[0], command)
+
+
+def name_console(title: str) -> None:
+    import ctypes
+
+    ctypes.windll.kernel32.SetConsoleTitleW(title)
 
 
 def ensure_default_agents(store) -> list[Agent]:

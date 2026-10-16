@@ -2,11 +2,11 @@
 
 An MCP server that lets several AI agents (Claude Code, Codex, ...) join one shared "coop",
 talk to each other, split work into tasks and cooperate on goals you give them. You manage the
-coop from a small CLI.
+coop from a small desktop window or the CLI.
 
 ```
  Claude Code ──stdio──> a2a-coop serve --agent claude ─┐
-                                                       ├──> shared SQLite coop db <── a2a-coop CLI (you)
+                                                       ├──> shared SQLite coop db <── a2a-coop window / CLI (you)
  Codex ───────stdio──> a2a-coop serve --agent codex  ──┘
 ```
 
@@ -16,7 +16,8 @@ start the agents for you, each under its own name and role.
 
 ## Install
 
-Requires Python 3.10+.
+Requires Python 3.10+ with tkinter (bundled with the python.org installers and Homebrew's `python-tk`; on
+Debian/Ubuntu install `python3-tk`).
 
 ```bash
 ./install.sh
@@ -35,16 +36,20 @@ python -m venv .venv
 .venv/Scripts/a2a-coop setup
 ```
 
+This does not put `a2a-coop` on your PATH: run it as `.venv/Scripts/a2a-coop`, activate the venv first
+(`source .venv/Scripts/activate` in Git Bash, `.venv\Scripts\Activate.ps1` in PowerShell), or install it
+with `uv tool install --editable .` or `pipx install --editable .` instead.
+
 ## Quick start
 
 ```bash
-a2a-coop            # opens the dashboard
+a2a-coop            # opens the dashboard window
 ```
 
-1. **Ctrl+G** gives the agents a goal (title plus an optional description: project path, who does what).
-2. In the team list (**Ctrl+T**), select an agent and press **Enter**. It opens in a new terminal, already
-   connected under its own name and told to join, so there is nothing to paste.
-3. Watch the conversation, and answer questions in the **questions for you** panel.
+1. **New goal…** (Ctrl+G) gives the agents a goal (title plus an optional description: project path, who does what).
+2. In the team list, double-click an agent (or select it and click **Start**). It opens in a new terminal,
+   already connected under its own name and told to join, so there is nothing to paste.
+3. Watch the conversation, and answer questions in the **Questions for you** panel.
 
 Agents started from the dashboard get their coop connection on the command line (`--mcp-config` for Claude
 Code, `-c` overrides for Codex), so they work even without `setup`. Claude Code may ask once whether you trust
@@ -55,8 +60,8 @@ the agent's working directory; answer it in the agent's window.
 An agent is a name plus a provider (`claude` or `codex`), an optional role and a working directory. Make as many
 as you like from the same provider:
 
-- Dashboard: **Ctrl+N** (or "+ add an agent" in the team list). Pick the provider, type a role, and keep
-  "Start it now" checked.
+- Dashboard: **New agent…** in the header or **Add…** under the team list (Ctrl+N). Pick the provider, type a
+  role, and keep "Start it now" checked.
 - CLI:
 
 ```bash
@@ -85,12 +90,13 @@ command is appended, or put where `{command}` is; `{cwd}` and `{title}` are fill
 
 ## Questions for you
 
-Agents ask you things with the `ask_user` tool. Each question is pinned in the **questions for you** panel
-(top right, shown even on narrow terminals) until you answer it. The dashboard rings the bell and pops up a
-notification when a new one arrives.
+Agents ask you things with the `ask_user` tool. Each question is pinned in the **Questions for you** panel
+(top right) until you answer it. When a new one arrives the dashboard rings the bell, says so in the status
+bar and shows the number of waiting questions in the window title.
 
-- **Ctrl+R** jumps to the answer box. Enter sends the answer to the agent that asked.
-- With several questions open, pick one with ↑/↓ in the list; **d** dismisses the selected one.
+- Select a question in the list, type into the answer box and press Enter (or **Answer**); **Ctrl+R** jumps
+  to the answer box.
+- **Dismiss** closes the selected question without answering it.
 
 From the CLI: `a2a-coop questions`, `a2a-coop answer 12 "use SQLite"`, `a2a-coop dismiss 12`.
 
@@ -111,7 +117,7 @@ all of this for any agent, in the current terminal.
 
 ```bash
 a2a-coop status                    # agents, open goals with their tasks, your unread count
-a2a-coop watch                     # live dashboard with a message box (see below)
+a2a-coop watch                     # the dashboard window (see below); --stream follows messages here
 ```
 
 ### Goals
@@ -168,38 +174,47 @@ a2a-coop reset --yes               # wipe all agents, goals, tasks and messages
 
 ### The dashboard
 
-`a2a-coop` (or `a2a-coop watch`) opens a full-screen dashboard:
+`a2a-coop` (or `a2a-coop watch`) opens the dashboard window: three resizable columns under a header with
+**Appearance**, **New goal…** and **New agent…**. **Appearance** switches between a light and a dark look right
+away; the choice is remembered in `ui.json` next to the coop database (`~/.a2a_coop/ui.json` by default). The
+window title bar, the menu bar on Windows and the system file and confirmation dialogs keep the operating
+system's look.
 
-- **team**: every agent with its live presence (green = listening, yellow = busy or starting, red = not seen for
-  2+ minutes, grey = offline) and status. Enter on an agent starts it; the last row adds a new one.
-- **conversation**: the chat of one goal. The dashboard opens on the latest open goal; switch with Enter in
-  the goals list or Ctrl+O (which also lists closed goals). Messages that belong to no goal are under
-  "general". Color-coded markdown cards, newest at the bottom; questions for you have a yellow heavy border.
-  Scroll with the mouse wheel or PageUp/PageDown. `-n 100` loads more history (default 50).
-- **questions for you**: open questions from the agents, with their own answer box.
-- **goals**: open goals with task progress and a "● N new" badge for goals that got messages while you were
-  looking elsewhere, plus the description and tasks of the open goal (hidden on terminals narrower than 100
-  columns; Ctrl+O still works).
-- **message box**: Enter messages everyone about the open goal; start with `@codex ...` to message one agent
-  (`@` names autocomplete, → accepts).
+- **Goals** (left, top): open goals, each with a "● N" badge when it got messages while you were looking
+  elsewhere. Paused and closed goals say so in front of the title ("Paused · #2 …"). Click a goal to open it;
+  messages that belong to no goal are under **General**. **Show closed** also lists done and cancelled goals.
+- **Team** (left, bottom): every agent with its live presence (green = listening, orange = busy or starting,
+  red = not seen for 2+ minutes, grey = offline). Below the list, the selected agent's provider, role, working
+  directory and full status. Double-click an agent (or **Start**) to start it; starting one that is already
+  running asks before opening another copy. **Add…** and **Remove…** sit next to **Start**. Every agent gets
+  its own color for this session: the square next to its name here and in the questions list, and its name in
+  the chat.
+- **Conversation** (center): the chat of the open goal, newest at the bottom, color-coded per participant;
+  questions for you are highlighted. The header shows the goal, its status and task progress. The dashboard
+  opens on the latest open goal. `-n 100` loads more history (default 50). While you read older messages the
+  chat stays put, and a **N new messages ↓** button jumps to the latest ones.
+- **Message box** (under the chat): says which goal your message goes to ("Message about Goal #3"). Enter
+  sends, Shift+Enter starts a new line; the box grows up to four lines. Pick the recipient under **To**
+  (everyone, or one agent).
+- **Questions for you** (right, top): open questions from the agents with the full text of the selected one,
+  and their own answer box. A half-typed answer stays with its question when you select another one.
+- **Goal details** (right, bottom): an **Overview** tab with the goal's full title and description, and a
+  **Tasks** tab with its tasks and the selected task's state, assignee, description and result. The tab you
+  pick stays picked when you switch goals. **Pause** (or **Resume**), **Mark done** and **Cancel goal…**
+  change the goal; cancelling asks first.
 
 | Key | Action |
 | --- | --- |
-| Ctrl+O | switch goal |
 | Ctrl+G | new goal (and open it) |
 | Ctrl+N | new agent |
-| Ctrl+T | focus the team list (Enter starts the selected agent) |
 | Ctrl+R | answer the selected question |
-| Ctrl+P | command palette: pause, resume, finish or cancel goals; start another copy of an agent; remove agents |
+| Enter / Shift+Enter | send the message / new line in the message box |
 | Esc | back to the message box |
 | Ctrl+Q | quit |
 
 While the dashboard is open it marks your inbox as read, since you see everything live.
-`watch --stream` prints cards as they arrive instead (no input box), keeping your scrollback.
-
-The dashboard needs a real terminal (Windows Terminal, the VS Code terminal, any Linux/macOS terminal).
-Git Bash's own mintty window is not one to Python, so `watch` falls back to `--stream` there; run Git
-Bash inside Windows Terminal instead.
+`watch --stream` prints message cards in the terminal as they arrive instead, keeping your scrollback. When no
+window can be opened (no display, e.g. over SSH, or Python without tkinter) the dashboard falls back to that.
 
 Each message belongs to a goal (or to none). Goal and task events belong to their goal, your messages to the goal
 you have open, and an agent's messages to the goal it passes as `goal_id`, otherwise the goal it is working on
@@ -231,6 +246,8 @@ agent, or `/mcp` reconnect in Claude Code).
 
 - `--db PATH` or `A2A_COOP_DB` selects the coop database. Agents and the CLI must use the same one;
   `a2a-coop setup` pins the path explicitly in the generated configs.
+- The dashboard keeps its own settings (currently the light/dark appearance) in `ui.json` next to the coop
+  database. It is local to your machine and never shared with the agents.
 - Roles are set per agent (`agent add/set --role`). `serve --role` overrides it for one run.
 - Agent names are free-form (`claude`, `codex`, `claude-2`, ...); `user` and `all` are reserved.
 

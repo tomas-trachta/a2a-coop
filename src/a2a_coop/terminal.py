@@ -65,7 +65,7 @@ def windows_terminal(title: str, command: list[str], cwd: Path, which: Which) ->
     if which("wt"):
         return ["wt", "-w", "0", "new-tab", "--title", title, "-d", str(cwd), *command], "a new Windows Terminal tab"
 
-    return ["cmd", "/c", "start", title, "/D", str(cwd), *command], "a new console window"
+    return command, "a new console window"
 
 
 def mac_terminal(command: list[str], cwd: Path) -> list[str]:
@@ -97,14 +97,7 @@ def open_window(title: str, command: list[str], cwd: Path) -> str:
     argv, where = window_command(title, command, cwd)
 
     try:
-        subprocess.Popen(
-            argv,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **detached_options(),
-        )
+        subprocess.Popen(argv, cwd=cwd, **detached_options())
     except OSError as error:
         raise CoopError(f"Could not open a terminal with `{argv[0]}`: {error}") from error
 
@@ -113,6 +106,11 @@ def open_window(title: str, command: list[str], cwd: Path) -> str:
 
 def detached_options() -> dict:
     if sys.platform == "win32":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        return {"creationflags": subprocess.CREATE_NEW_CONSOLE}
 
-    return {"start_new_session": True}
+    return {
+        "start_new_session": True,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }

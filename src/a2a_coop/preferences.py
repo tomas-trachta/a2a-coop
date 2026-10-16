@@ -1,0 +1,51 @@
+import json
+import os
+import tempfile
+from pathlib import Path
+
+FILE_NAME = "ui.json"
+APPEARANCE_KEY = "appearance"
+APPEARANCES = ("light", "dark")
+DEFAULT_APPEARANCE = "light"
+
+
+def preferences_path(db_path: Path) -> Path:
+    return Path(db_path).parent / FILE_NAME
+
+
+def load_appearance(path: Path) -> str:
+    appearance = read_preferences(path).get(APPEARANCE_KEY)
+
+    return appearance if appearance in APPEARANCES else DEFAULT_APPEARANCE
+
+
+def save_appearance(path: Path, appearance: str) -> None:
+    if appearance not in APPEARANCES:
+        raise ValueError(f"Unknown appearance {appearance!r}.")
+
+    write_atomically(path, {**read_preferences(path), APPEARANCE_KEY: appearance})
+
+
+def read_preferences(path: Path) -> dict:
+    try:
+        loaded = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def write_atomically(path: Path, preferences: dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    handle, temporary = tempfile.mkstemp(prefix=".ui-", suffix=".json", dir=path.parent)
+
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as file:
+            json.dump(preferences, file, indent=2)
+
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise

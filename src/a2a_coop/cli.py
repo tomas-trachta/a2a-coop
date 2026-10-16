@@ -1,4 +1,5 @@
 import argparse
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -6,12 +7,13 @@ from typing import Optional
 
 from rich.console import Console
 
-from . import connect, events, launch, pretty, providers, render, server, tui
+from . import connect, events, launch, pretty, providers, render, server
 from .errors import CoopError
 from .models import Message
 from .paths import DB_ENV_VAR, default_db_path
 from .store import TASK_STATUSES, USER, CoopStore
 
+PROGRAM = "a2a-coop"
 WATCH_INTERVAL_SECONDS = 1.0
 
 GOAL_STATUS_VERBS = {
@@ -54,7 +56,7 @@ def expanded_path(value: str) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="a2a-coop",
+        prog=PROGRAM,
         description="Let AI agents such as Claude and Codex cooperate on goals you give them, over MCP. "
         "Run without a command to open the dashboard.",
     )
@@ -228,9 +230,9 @@ def add_message_commands(commands: argparse._SubParsersAction) -> None:
     log.add_argument("--goal", dest="goal_id", type=int, help="only the conversation of this goal")
     log.set_defaults(handler=show_log)
 
-    watch = commands.add_parser("watch", help="live dashboard with a message box (Ctrl+Q to quit)")
+    watch = commands.add_parser("watch", help="open the dashboard window (or follow messages here with --stream)")
     watch.add_argument("-n", "--backlog", type=int, default=50, help="how many recent messages to show")
-    watch.add_argument("--stream", action="store_true", help="print messages as they arrive instead of the dashboard")
+    watch.add_argument("--stream", action="store_true", help="print messages as they arrive instead of opening a window")
     watch.set_defaults(handler=watch_messages)
 
 
@@ -425,11 +427,26 @@ def print_cards(messages: list[Message], empty: str) -> None:
 
 
 def watch_messages(store: CoopStore, args: argparse.Namespace) -> None:
-    if args.stream or not sys.stdout.isatty():
+    if args.stream:
         stream_messages(store, args.backlog)
-    else:
-        launch.ensure_default_agents(store)
-        tui.watch(store, args.backlog)
+        return
+
+    launch.ensure_default_agents(store)
+
+    try:
+        open_dashboard(store, args.backlog)
+    except CoopError as error:
+        print(f"{error} Following messages here instead.", file=sys.stderr)
+        stream_messages(store, args.backlog)
+
+
+def open_dashboard(store: CoopStore, backlog: int) -> None:
+    try:
+        from . import gui
+    except ImportError as error:
+        raise CoopError(f"The dashboard needs tkinter ({error}).") from error
+
+    gui.watch(store, backlog)
 
 
 def stream_messages(store: CoopStore, backlog: int) -> None:
@@ -468,7 +485,28 @@ def show_setup(store: CoopStore, args: argparse.Namespace) -> None:
         print(f"Added agent {agent.name} ({agent.provider}).")
 
     print()
-    print("Open the dashboard with `a2a-coop` and start agents from there (select one, press Enter).")
+    print(f"Open the dashboard with `{dashboard_command()}` and start agents from there (double-click one).")
+
+    if not shutil.which(PROGRAM):
+        print(f"Add {installed_scripts_dir()} to your PATH to run `{PROGRAM}` from anywhere.")
+
+
+def dashboard_command() -> str:
+    if shutil.which(PROGRAM):
+        return PROGRAM
+
+    return shortest_path(installed_scripts_dir() / PROGRAM).as_posix()
+
+
+def installed_scripts_dir() -> Path:
+    return Path(sys.executable).parent
+
+
+def shortest_path(path: Path) -> Path:
+    try:
+        return path.relative_to(Path.cwd())
+    except ValueError:
+        return path
 
 
 def kick_agent(store: CoopStore, args: argparse.Namespace) -> None:
