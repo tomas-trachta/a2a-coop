@@ -114,7 +114,8 @@ def message_line(message: Message) -> str:
 
 
 def message_header(message: Message) -> str:
-    stamp = f"#{message.id} {clock(message.created_at)}"
+    goal = f" [goal #{message.goal_id}]" if message.goal_id is not None else ""
+    stamp = f"#{message.id} {clock(message.created_at)}{goal}"
 
     if message.kind == EVENT:
         return f"{stamp} *"

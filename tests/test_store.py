@@ -227,11 +227,22 @@ def test_old_databases_are_migrated(tmp_path):
                 activity TEXT NOT NULL DEFAULT 'active', joined_at REAL NOT NULL, last_seen REAL NOT NULL);
             CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL,
                 body TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'chat', created_at REAL NOT NULL);
+            CREATE TABLE goals (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', created_at REAL NOT NULL);
+            CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER NOT NULL, title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '', assignee TEXT, status TEXT NOT NULL DEFAULT 'todo',
+                result TEXT NOT NULL DEFAULT '', created_by TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL);
             INSERT INTO agents VALUES ('claude', 'architect', '', 'offline', 1, 1);
+            INSERT INTO goals (title, created_at) VALUES ('Hook', 1);
+            INSERT INTO tasks (goal_id, title, created_by, created_at, updated_at) VALUES (1, 'Rope', 'user', 1, 1);
             INSERT INTO messages (sender, recipient, body, kind, created_at) VALUES ('claude', 'user', 'old news', 'chat', 1);
+            INSERT INTO messages (sender, recipient, body, kind, created_at) VALUES ('user', 'all', 'user set a new goal #1: Hook', 'event', 1);
+            INSERT INTO messages (sender, recipient, body, kind, created_at) VALUES ('claude', 'all', 'claude claimed task #1: Rope', 'event', 1);
         """)
 
     store = CoopStore(path)
 
     assert store.get_agent("claude").provider == ""
     assert store.open_questions() == []
+    assert [message.body for message in store.goal_messages(1)] == ["user set a new goal #1: Hook", "claude claimed task #1: Rope"]
+    assert [message.body for message in store.goal_messages(None)] == ["old news"]

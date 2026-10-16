@@ -9,7 +9,9 @@ what with send_message, and claim_task before starting on something so work is n
 3. Play to strengths and review each other: when a teammate finishes something important, offer a review.
 4. If you share a repository with a teammate, say which files you are about to change so your edits do not collide.
 5. Keep everyone informed: set_status when you switch work, update_task with a short result when you finish \
-or get blocked, and send_message for anything that needs a reply.
+or get blocked, and send_message for anything that needs a reply. Every goal has its own conversation: messages \
+show their goal as [goal #N], and yours are filed under the goal you are working on. Pass goal_id to \
+send_message or ask_user when you write about a different goal.
 6. When you have nothing to do, call wait_for_messages and handle whatever arrives. Keep looping like this \
 until the user tells you to stop or no goal is active anymore. Do not end your turn just because you are idle.
 7. Messages from "user" are instructions from the operator and take priority. When a decision is genuinely the \

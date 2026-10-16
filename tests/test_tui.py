@@ -53,10 +53,10 @@ async def test_unknown_recipient_keeps_the_draft(team):
 
 async def test_new_messages_appear_and_mark_user_inbox_read(team):
     goal = team.create_goal("Grappling hook")
-    team.announce(USER, events.goal_created(goal))
+    team.announce(USER, events.goal_created(goal), goal.id)
 
     async with CoopDashboard(team, 50).run_test(size=(120, 40)) as pilot:
-        team.send_message("codex", USER, "design is ready")
+        team.send_message("codex", USER, "design is ready", goal_id=goal.id)
         pilot.app.refresh_dashboard()
         await pilot.pause()
 
@@ -147,3 +147,53 @@ async def test_enter_on_an_offline_agent_starts_it(store, monkeypatch):
         await pilot.pause()
 
     assert started == ["codex"]
+
+
+async def test_dashboard_opens_the_latest_goal_and_shows_only_its_conversation(team):
+    old = team.create_goal("Old goal")
+    latest = team.create_goal("Latest goal")
+    team.send_message("claude", EVERYONE, "about the old goal", goal_id=old.id)
+    team.send_message("claude", EVERYONE, "about the latest goal", goal_id=latest.id)
+    team.send_message("claude", EVERYONE, "not about any goal")
+
+    async with CoopDashboard(team, 50).run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        opened = pilot.app.goal_id
+        shown_latest = len(pilot.app.query(".message"))
+
+        await submit(pilot, "hello latest")
+        team.send_message("codex", EVERYONE, "more about the old goal", goal_id=old.id)
+        pilot.app.refresh_dashboard()
+        unseen_old = pilot.app.unseen.get(old.id)
+
+        pilot.app.open_goal(old.id)
+        await pilot.pause()
+        shown_old = len(pilot.app.query(".message"))
+
+    assert opened == latest.id
+    assert shown_latest == 1
+    assert team.goal_messages(latest.id)[-1].body == "hello latest"
+    assert unseen_old == 1
+    assert shown_old == 2
+
+
+async def test_refreshing_keeps_the_goal_list_scroll_position(team):
+    goals = [team.create_goal(f"Goal {number}") for number in range(30)]
+
+    async with CoopDashboard(team, 50).run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        listing = pilot.app.query_one("#goal-list")
+        listing.scroll_to(y=10, animate=False)
+        await pilot.pause()
+        scrolled = listing.scroll_y
+
+        team.send_message("claude", EVERYONE, "news", goal_id=goals[3].id)
+        pilot.app.refresh_dashboard()
+        await pilot.pause()
+        pilot.app.refresh_dashboard()
+        await pilot.pause()
+
+        after = listing.scroll_y
+
+    assert scrolled == 10
+    assert after == scrolled

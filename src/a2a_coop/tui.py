@@ -2,7 +2,7 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional
 
-from rich.console import Group
+from rich.console import Group, RenderableType
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult, SystemCommand
@@ -16,8 +16,8 @@ from textual.widgets.option_list import Option
 from . import events as coop_events
 from . import launch, pretty, providers, render
 from .errors import CoopError
-from .models import Agent, Message
-from .screens import AgentDraft, AgentForm, GoalDraft, GoalForm
+from .models import Agent, Goal, Message, Task
+from .screens import AgentDraft, AgentForm, GoalDraft, GoalForm, GoalPicker
 from .store import EVERYONE, OFFLINE, USER, CoopStore
 
 REFRESH_SECONDS = 1.0
@@ -27,7 +27,9 @@ NEW_AGENT_OPTION = "+new-agent"
 
 COMPOSER_HINT = "Message everyone, or start with @agent to message one agent  ·  Enter to send"
 ANSWER_HINT = "Nothing to answer"
-EMPTY_CONVERSATION_HINT = "Nothing said yet. Give the agents a goal with Ctrl+G, then start them from the team list."
+EMPTY_CONVERSATION_HINT = "Nothing said about this goal yet."
+NO_GOALS_HINT = "No goals yet. Press Ctrl+G to give the agents one, then start them from the team list."
+GENERAL_OPTION = "general"
 NO_QUESTIONS_HINT = "No open questions. When an agent asks you something, it is pinned here."
 
 GOAL_ACTIONS = (
@@ -92,14 +94,27 @@ CSS = """
     height: 1fr;
     border: round gray;
     border-title-align: left;
+    border-subtitle-align: right;
     padding: 0 1;
+}
+
+#goal-list {
+    height: auto;
+    max-height: 12;
+    border: none;
+    padding: 0;
+}
+
+#goal-details {
+    height: 1fr;
+    margin-top: 1;
 }
 
 .message {
     height: auto;
 }
 
-#empty-hint {
+.empty-hint {
     color: gray;
 }
 """
@@ -114,6 +129,7 @@ class CoopDashboard(App):
     CSS = CSS
 
     BINDINGS = [
+        Binding("ctrl+o", "pick_goal", "Switch goal", priority=True),
         Binding("ctrl+g", "new_goal", "New goal", priority=True),
         Binding("ctrl+n", "new_agent", "New agent", priority=True),
         Binding("ctrl+t", "focus_team", "Start agents", priority=True),
@@ -136,13 +152,15 @@ class CoopDashboard(App):
         self.questions: list[Message] = []
         self.starting: dict[str, float] = {}
         self.wide = True
+        self.goal_id: Optional[int] = None
+        self.unseen: dict[Optional[int], int] = {}
+        self.details_key: Optional[tuple] = None
 
     def compose(self) -> ComposeResult:
         yield OptionList(id="team")
 
         with Horizontal(id="main"):
-            with VerticalScroll(id="conversation"):
-                yield Static(EMPTY_CONVERSATION_HINT, id="empty-hint")
+            yield VerticalScroll(id="conversation")
 
             with Vertical(id="side"):
                 with Vertical(id="questions-panel"):
@@ -150,8 +168,11 @@ class CoopDashboard(App):
                     yield QuestionList(id="questions")
                     yield Input(placeholder=ANSWER_HINT, id="answer", disabled=True)
 
-                with VerticalScroll(id="sidebar"):
-                    yield Static(id="goals")
+                with Vertical(id="sidebar"):
+                    yield OptionList(id="goal-list")
+
+                    with VerticalScroll(id="goal-details"):
+                        yield Static(id="goals")
 
         yield Input(placeholder=COMPOSER_HINT, id="composer")
         yield Footer()
@@ -160,7 +181,8 @@ class CoopDashboard(App):
         self.label_panels()
         self.query_one("#conversation", VerticalScroll).anchor()
 
-        self.show_backlog()
+        self.goal_id = latest_goal_id(self.store)
+        self.load_conversation()
         self.refresh_dashboard()
         self.set_interval(REFRESH_SECONDS, self.refresh_dashboard)
 
@@ -178,9 +200,9 @@ class CoopDashboard(App):
 
     def label_panels(self) -> None:
         self.query_one("#team").border_title = "a2a-coop · team  (Enter on an agent starts it)"
-        self.query_one("#conversation").border_title = "conversation"
         self.query_one("#questions-panel").border_title = "questions for you"
-        self.query_one("#sidebar").border_title = "goals & tasks"
+        self.query_one("#sidebar").border_title = "goals"
+        self.query_one("#sidebar").border_subtitle = "Enter opens · ^O all"
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "answer":
@@ -195,7 +217,7 @@ class CoopDashboard(App):
             self.notify("Type a message after the @name.", severity="warning")
             return
 
-        if self.attempt(lambda: self.store.send_message(USER, recipient, body)):
+        if self.attempt(lambda: self.store.send_message(USER, recipient, body, goal_id=self.goal_id)):
             composer.clear()
             self.refresh_dashboard()
 
@@ -213,6 +235,8 @@ class CoopDashboard(App):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id == "team":
             self.team_option_selected(event.option.id)
+        elif event.option_list.id == "goal-list":
+            self.open_goal(parse_goal_option(event.option.id))
         elif event.option_list.id == "questions":
             self.query_one("#answer", Input).focus()
 
@@ -253,6 +277,25 @@ class CoopDashboard(App):
         if target is not None and self.attempt(lambda: self.store.dismiss_question(target)):
             self.refresh_dashboard()
 
+    def action_pick_goal(self) -> None:
+        if isinstance(self.screen, (GoalForm, AgentForm, GoalPicker)):
+            return
+
+        goals = self.store.list_goals(include_closed=True)
+        options = [self.goal_option(goal) for goal in reversed(goals)] + [self.general_option()]
+
+        self.push_screen(GoalPicker(options, goal_option_id(self.goal_id)), self.picked_goal)
+
+    def picked_goal(self, option_id: Optional[str]) -> None:
+        if option_id is not None:
+            self.open_goal(parse_goal_option(option_id))
+
+    def open_goal(self, goal_id: Optional[int]) -> None:
+        self.goal_id = goal_id
+        self.unseen.pop(goal_id, None)
+        self.load_conversation()
+        self.refresh_dashboard()
+
     def action_new_goal(self) -> None:
         if not isinstance(self.screen, (GoalForm, AgentForm)):
             self.push_screen(GoalForm(self.create_goal))
@@ -263,16 +306,19 @@ class CoopDashboard(App):
             self.push_screen(AgentForm(self.create_agent, taken, self.workdir))
 
     def create_goal(self, draft: GoalDraft) -> bool:
+        created: list[int] = []
+
         def create() -> None:
             goal = self.store.create_goal(draft.title, draft.description)
-            self.store.announce(USER, coop_events.goal_created(goal))
+            self.store.announce(USER, coop_events.goal_created(goal), goal.id)
+            created.append(goal.id)
 
-        created = self.attempt(create)
+        if not self.attempt(create):
+            return False
 
-        if created:
-            self.refresh_dashboard()
+        self.open_goal(created[0])
 
-        return created
+        return True
 
     def create_agent(self, draft: AgentDraft) -> bool:
         def define() -> None:
@@ -310,7 +356,7 @@ class CoopDashboard(App):
     def set_goal_status(self, goal_id: int, status: str) -> None:
         def change() -> None:
             goal = self.store.set_goal_status(goal_id, status)
-            self.store.announce(USER, coop_events.goal_status_changed(goal))
+            self.store.announce(USER, coop_events.goal_status_changed(goal), goal.id)
 
         if self.attempt(change):
             self.refresh_dashboard()
@@ -337,6 +383,15 @@ class CoopDashboard(App):
         for agent in self.agents:
             yield from agent_commands(self, agent)
 
+        for goal in reversed(self.store.list_goals(include_closed=True)):
+            yield SystemCommand(
+                f"Open goal #{goal.id}: {goal.title}",
+                f"Show the conversation of this {goal.status} goal",
+                lambda goal_id=goal.id: self.open_goal(goal_id),
+            )
+
+        yield SystemCommand("Open general conversation", "Messages that belong to no goal", lambda: self.open_goal(None))
+
         for goal in self.store.list_goals():
             for label, status, allowed in GOAL_ACTIONS:
                 if goal.status in allowed:
@@ -346,14 +401,38 @@ class CoopDashboard(App):
                         lambda goal_id=goal.id, status=status: self.set_goal_status(goal_id, status),
                     )
 
-    def show_backlog(self) -> None:
-        recent = self.store.recent_messages(self.backlog) if self.backlog > 0 else []
+    def load_conversation(self) -> None:
+        conversation = self.query_one("#conversation", VerticalScroll)
+        conversation.remove_children()
+        conversation.mount(Static(self.empty_hint(), classes="empty-hint"))
+
         self.last_message_id = self.store.latest_message_id()
+        recent = self.store.goal_messages(self.goal_id, self.backlog) if self.backlog > 0 else []
 
         self.show_messages(recent)
+        self.label_conversation()
+
+    def empty_hint(self) -> str:
+        if self.goal_id is None and not self.store.list_goals(include_closed=True):
+            return NO_GOALS_HINT
+
+        return EMPTY_CONVERSATION_HINT
+
+    def label_conversation(self) -> None:
+        conversation = self.query_one("#conversation")
+        composer = self.query_one("#composer", Input)
+
+        if self.goal_id is None:
+            conversation.border_title = "general conversation (no goal)"
+            composer.placeholder = COMPOSER_HINT
+            return
+
+        goal = self.store.get_goal(self.goal_id)
+        conversation.border_title = f"goal #{goal.id} · {goal.title} · {goal.status}"
+        composer.placeholder = f"Message everyone about goal #{goal.id}, or start with @agent  ·  Enter to send"
 
     def refresh_dashboard(self) -> None:
-        self.show_messages(self.store.messages_after(self.last_message_id))
+        self.receive(self.store.messages_after(self.last_message_id))
         self.store.take_unread(USER)
 
         self.agents = self.store.list_agents()
@@ -361,7 +440,22 @@ class CoopDashboard(App):
         self.show_team(self.agents)
         self.update_suggestions(self.agents)
         self.show_questions(self.store.open_questions())
+        self.show_goal_list()
         self.show_goals()
+
+    def receive(self, messages: list[Message]) -> None:
+        if not messages:
+            return
+
+        self.last_message_id = max(self.last_message_id, messages[-1].id)
+        self.show_messages([message for message in messages if message.goal_id == self.goal_id])
+
+        for message in messages:
+            if message.goal_id != self.goal_id and message.sender != USER:
+                self.unseen[message.goal_id] = self.unseen.get(message.goal_id, 0) + 1
+
+        if self.goal_id is not None and any(message.goal_id == self.goal_id for message in messages):
+            self.label_conversation()
 
     def show_messages(self, messages: list[Message]) -> None:
         if not messages:
@@ -369,23 +463,20 @@ class CoopDashboard(App):
 
         self.remove_empty_hint()
         self.query_one("#conversation").mount_all(Static(pretty.message(item), classes="message") for item in messages)
-        self.last_message_id = max(self.last_message_id, messages[-1].id)
 
     def remove_empty_hint(self) -> None:
-        for hint in self.query("#empty-hint"):
+        for hint in self.query(".empty-hint"):
             hint.remove()
 
     def show_team(self, agents: list[Agent]) -> None:
         now = time.time()
         team = self.query_one("#team", OptionList)
-        highlighted = team.highlighted_option.id if team.highlighted_option else None
 
         self.forget_started_agents(agents, now)
         options = [Option(self.agent_prompt(agent, now), id=agent.name) for agent in agents]
         options.append(Option(Text("+ add an agent (Ctrl+N)", style="dim"), id=NEW_AGENT_OPTION))
 
-        team.set_options(options)
-        restore_highlight(team, highlighted)
+        sync_options(team, options)
         team.border_subtitle = time.strftime("%H:%M:%S", time.localtime(now))
 
     def agent_prompt(self, agent: Agent, now: float) -> Text:
@@ -423,9 +514,7 @@ class CoopDashboard(App):
         self.questions = questions
 
         listing = self.query_one("#questions", OptionList)
-        highlighted = listing.highlighted_option.id if listing.highlighted_option else None
-        listing.set_options(Option(pretty.question(question), id=str(question.id)) for question in questions)
-        restore_highlight(listing, highlighted)
+        sync_options(listing, [Option(pretty.question(question), id=str(question.id)) for question in questions])
 
         panel = self.query_one("#questions-panel")
         panel.set_class(bool(questions), "waiting")
@@ -468,12 +557,34 @@ class CoopDashboard(App):
         sender = next((question.sender for question in self.questions if question.id == target), "")
         answer_box.placeholder = f"Answer #{target} ({sender}), Enter sends"
 
-    def show_goals(self) -> None:
-        goals = [(goal, self.store.list_tasks(goal_id=goal.id)) for goal in self.store.list_goals()]
-        blocks = [pretty.goal_block(goal, tasks) for goal, tasks in goals]
-        empty = Text("No open goals. Press Ctrl+G to add one.", style="dim")
+    def show_goal_list(self) -> None:
+        listing = self.query_one("#goal-list", OptionList)
+        goals = [goal for goal in self.store.list_goals(include_closed=True) if goal.status in ("active", "paused") or goal.id == self.goal_id]
+        options = [*(self.goal_option(goal) for goal in reversed(goals)), self.general_option()]
 
-        self.query_one("#goals", Static).update(Group(*blocks) if blocks else empty)
+        sync_options(listing, options, fallback=goal_option_id(self.goal_id))
+
+    def goal_option(self, goal: Goal) -> Option:
+        tasks = self.store.list_tasks(goal_id=goal.id)
+        prompt = pretty.goal_entry(goal, tasks, goal.id == self.goal_id, self.unseen.get(goal.id, 0))
+
+        return Option(prompt, id=goal_option_id(goal.id))
+
+    def general_option(self) -> Option:
+        prompt = pretty.general_entry(self.goal_id is None, self.unseen.get(None, 0))
+
+        return Option(prompt, id=GENERAL_OPTION)
+
+    def show_goals(self) -> None:
+        goal = self.store.get_goal(self.goal_id) if self.goal_id is not None else None
+        tasks = self.store.list_tasks(goal_id=goal.id) if goal else []
+        key = (goal, tuple(tasks))
+
+        if key == self.details_key:
+            return
+
+        self.details_key = key
+        self.query_one("#goals", Static).update(goal_details(goal, tasks))
 
 
 def agent_commands(app: CoopDashboard, agent: Agent) -> Iterable[SystemCommand]:
@@ -487,6 +598,49 @@ def agent_commands(app: CoopDashboard, agent: Agent) -> Iterable[SystemCommand]:
         "Remove the agent from the coop (it can be added again)",
         lambda name=agent.name: app.remove_agent(name),
     )
+
+
+def latest_goal_id(store: CoopStore) -> Optional[int]:
+    goals = store.list_goals() or store.list_goals(include_closed=True)
+
+    return goals[-1].id if goals else None
+
+
+def goal_option_id(goal_id: Optional[int]) -> str:
+    return GENERAL_OPTION if goal_id is None else f"goal-{goal_id}"
+
+
+def parse_goal_option(option_id: Optional[str]) -> Optional[int]:
+    if not option_id or option_id == GENERAL_OPTION:
+        return None
+
+    return int(option_id.removeprefix("goal-"))
+
+
+def goal_details(goal: Optional[Goal], tasks: list[Task]) -> RenderableType:
+    if goal is None:
+        return Text("Messages that belong to no goal.", style="dim")
+
+    parts = [Text(goal.description, style="dim"), Text()] if goal.description else []
+
+    return Group(*parts, Text("tasks", style="bold"), pretty.task_table(tasks))
+
+
+def sync_options(listing: OptionList, options: list[Option], fallback: Optional[str] = None) -> None:
+    current = [listing.get_option_at_index(index) for index in range(listing.option_count)]
+
+    if [option.id for option in current] == [option.id for option in options]:
+        for index, (old, new) in enumerate(zip(current, options)):
+            if old.prompt != new.prompt:
+                listing.replace_option_prompt_at_index(index, new.prompt)
+        return
+
+    highlighted = listing.highlighted_option.id if listing.highlighted_option else fallback
+    scroll_y = listing.scroll_y
+
+    listing.set_options(options)
+    restore_highlight(listing, highlighted)
+    listing.scroll_to(y=scroll_y, animate=False)
 
 
 def restore_highlight(listing: OptionList, option_id: Optional[str]) -> None:

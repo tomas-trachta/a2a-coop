@@ -12,6 +12,7 @@ class Agent:
     last_seen: float
     provider: str = ""
     workdir: str = ""
+    current_goal_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -46,3 +47,4 @@ class Message:
     kind: str
     created_at: float
     handled_at: Optional[float] = None
+    goal_id: Optional[int] = None

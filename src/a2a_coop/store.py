@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS agents (
     joined_at REAL NOT NULL,
     last_seen REAL NOT NULL,
     provider TEXT NOT NULL DEFAULT '',
-    workdir TEXT NOT NULL DEFAULT ''
+    workdir TEXT NOT NULL DEFAULT '',
+    current_goal_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS goals (
@@ -66,7 +67,8 @@ CREATE TABLE IF NOT EXISTS messages (
     body TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'chat',
     created_at REAL NOT NULL,
-    handled_at REAL
+    handled_at REAL,
+    goal_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS cursors (
@@ -78,18 +80,21 @@ CREATE INDEX IF NOT EXISTS messages_by_recipient ON messages(recipient, id);
 CREATE INDEX IF NOT EXISTS tasks_by_goal ON tasks(goal_id);
 """
 
+GOAL_INDEX = "CREATE INDEX IF NOT EXISTS messages_by_goal ON messages(goal_id, id)"
+
+GOAL_MENTION = re.compile(r"\bgoal #(\d+)")
+TASK_MENTION = re.compile(r"\btask #(\d+)")
+
 ADDED_COLUMNS = {
     "agents": {
         "provider": "TEXT NOT NULL DEFAULT ''",
         "workdir": "TEXT NOT NULL DEFAULT ''",
+        "current_goal_id": "INTEGER",
     },
     "messages": {
         "handled_at": "REAL",
+        "goal_id": "INTEGER",
     },
-}
-
-BACKFILLS = {
-    ("messages", "handled_at"): "UPDATE messages SET handled_at = created_at",
 }
 
 UPSERT_AGENT = """
@@ -126,6 +131,15 @@ ORDER BY id
 INSERT_AGENT = """
 INSERT INTO agents (name, role, status, activity, joined_at, last_seen, provider, workdir)
 VALUES (?, ?, '', 'offline', ?, ?, ?, ?)
+"""
+
+GOAL_MESSAGES = """
+SELECT * FROM (
+    SELECT * FROM messages
+    WHERE goal_id IS ?
+    ORDER BY id DESC
+    LIMIT ?
+) ORDER BY id
 """
 
 RECENT_MESSAGES = """
@@ -292,6 +306,8 @@ class CoopStore:
         with self._connect() as connection:
             connection.execute("DELETE FROM tasks WHERE goal_id = ?", (goal_id,))
             connection.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+            connection.execute("UPDATE messages SET goal_id = NULL WHERE goal_id = ?", (goal_id,))
+            connection.execute("UPDATE agents SET current_goal_id = NULL WHERE current_goal_id = ?", (goal_id,))
 
         return goal, tasks
 
@@ -381,29 +397,59 @@ class CoopStore:
 
         return task
 
-    def send_message(self, sender: str, recipient: str, body: str, kind: str = CHAT) -> Message:
+    def send_message(
+        self,
+        sender: str,
+        recipient: str,
+        body: str,
+        kind: str = CHAT,
+        goal_id: Optional[int] = None,
+    ) -> Message:
         require_text(body, "Message")
         self._require_recipient(recipient, sender)
 
+        if goal_id is not None:
+            self.get_goal(goal_id)
+
         cursor = self._execute(
-            "INSERT INTO messages (sender, recipient, body, kind, created_at) VALUES (?, ?, ?, ?, ?)",
-            (sender, recipient, body.strip(), kind, time.time()),
+            "INSERT INTO messages (sender, recipient, body, kind, created_at, goal_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (sender, recipient, body.strip(), kind, time.time(), goal_id),
         )
 
         return self.get_message(cursor.lastrowid)
 
-    def announce(self, sender: str, text: str) -> Message:
-        return self.send_message(sender, EVERYONE, text, EVENT)
+    def announce(self, sender: str, text: str, goal_id: Optional[int] = None) -> Message:
+        return self.send_message(sender, EVERYONE, text, EVENT, goal_id)
 
-    def ask_user(self, sender: str, question: str) -> Message:
-        return self.send_message(sender, USER, question, QUESTION)
+    def ask_user(self, sender: str, question: str, goal_id: Optional[int] = None) -> Message:
+        return self.send_message(sender, USER, question, QUESTION, goal_id)
+
+    def goal_messages(self, goal_id: Optional[int], limit: int = 50) -> list[Message]:
+        return [Message(**row) for row in self._fetch_all(GOAL_MESSAGES, (goal_id, limit))]
+
+    def set_current_goal(self, agent: str, goal_id: Optional[int]) -> None:
+        self._execute("UPDATE agents SET current_goal_id = ? WHERE name = ?", (goal_id, agent))
+
+    def resolve_goal(self, agent: str, goal_id: Optional[int] = None) -> Optional[int]:
+        if goal_id is not None:
+            return self.get_goal(goal_id).id
+
+        open_ids = [goal.id for goal in self.list_goals()]
+        current = self.get_agent(agent).current_goal_id
+
+        if current in open_ids:
+            return current
+
+        active = [goal.id for goal in self.list_goals() if goal.status == "active"]
+
+        return active[0] if len(active) == 1 else None
 
     def open_questions(self) -> list[Message]:
         return [Message(**row) for row in self._fetch_all(OPEN_QUESTIONS)]
 
     def answer_question(self, message_id: int, text: str) -> Message:
         question = self._open_question(message_id)
-        reply = self.send_message(USER, question.sender, reply_body(question, text))
+        reply = self.send_message(USER, question.sender, reply_body(question, text), goal_id=question.goal_id)
         self._mark_handled(message_id)
 
         return reply
@@ -461,6 +507,7 @@ class CoopStore:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(SCHEMA)
             add_missing_columns(connection)
+            connection.execute(GOAL_INDEX)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -573,7 +620,40 @@ def add_missing_columns(connection: sqlite3.Connection) -> None:
             backfill = BACKFILLS.get((table, column))
 
             if backfill:
-                connection.execute(backfill)
+                backfill(connection)
+
+
+def mark_old_messages_handled(connection: sqlite3.Connection) -> None:
+    connection.execute("UPDATE messages SET handled_at = created_at")
+
+
+def tag_old_events_with_goals(connection: sqlite3.Connection) -> None:
+    goal_ids = {row[0] for row in connection.execute("SELECT id FROM goals")}
+    task_goals = dict(connection.execute("SELECT id, goal_id FROM tasks").fetchall())
+    events = connection.execute("SELECT id, body FROM messages WHERE kind = ?", (EVENT,)).fetchall()
+
+    for message_id, body in events:
+        goal_id = mentioned_goal(body, goal_ids, task_goals)
+
+        if goal_id is not None:
+            connection.execute("UPDATE messages SET goal_id = ? WHERE id = ?", (goal_id, message_id))
+
+
+def mentioned_goal(body: str, goal_ids: set[int], task_goals: dict[int, int]) -> Optional[int]:
+    goal = GOAL_MENTION.search(body)
+
+    if goal and int(goal.group(1)) in goal_ids:
+        return int(goal.group(1))
+
+    task = TASK_MENTION.search(body)
+
+    return task_goals.get(int(task.group(1))) if task else None
+
+
+BACKFILLS = {
+    ("messages", "handled_at"): mark_old_messages_handled,
+    ("messages", "goal_id"): tag_old_events_with_goals,
+}
 
 
 def reply_body(question: Message, text: str) -> str:
