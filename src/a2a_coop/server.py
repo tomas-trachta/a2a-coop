@@ -13,7 +13,7 @@ MAX_WAIT_SECONDS = 300
 POLL_INTERVAL_SECONDS = 1.0
 
 
-def serve(store: CoopStore, agent: str, role: str) -> None:
+def serve(store: CoopStore, agent: str, role: str = "") -> None:
     store.register_agent(agent, role)
 
     try:
@@ -23,7 +23,7 @@ def serve(store: CoopStore, agent: str, role: str) -> None:
 
 
 def build_server(store: CoopStore, agent: str) -> MCPServer:
-    server = MCPServer(name="a2a-coop", instructions=protocol.instructions_for(agent))
+    server = MCPServer(name="a2a-coop", instructions=protocol.instructions_for(agent, agent_role(store, agent)))
 
     register_team_tools(server, store, agent)
     register_message_tools(server, store, agent)
@@ -60,11 +60,19 @@ def register_team_tools(server: MCPServer, store: CoopStore, agent: str) -> None
 def register_message_tools(server: MCPServer, store: CoopStore, agent: str) -> None:
     @server.tool(structured_output=False)
     def send_message(to: str, message: str) -> str:
-        """Send a message. `to` is a teammate's name, "all" for every agent plus the user, or "user" for the human operator."""
+        """Send a message. `to` is a teammate's name, "all" for every agent plus the user, or "user" for the human operator. To ask the user something that needs a decision, use ask_user instead."""
         store.touch_agent(agent)
         sent = store.send_message(agent, to, message)
 
         return f"Sent message #{sent.id} to {sent.recipient}."
+
+    @server.tool(structured_output=False)
+    def ask_user(question: str) -> str:
+        """Ask the human operator a question that only they can decide. It is pinned in their dashboard until answered; the answer arrives later as a message from "user", so do not stop listening."""
+        store.touch_agent(agent)
+        asked = store.ask_user(agent, question)
+
+        return f"Asked the user (question #{asked.id}). The answer will arrive as a message; keep working or call wait_for_messages."
 
     @server.tool(structured_output=False)
     def read_messages() -> str:
@@ -157,9 +165,13 @@ def register_prompts(server: MCPServer) -> None:
         return protocol.JOIN_PROMPT
 
 
+def agent_role(store: CoopStore, agent: str) -> str:
+    return next((known.role for known in store.list_agents() if known.name == agent), "")
+
+
 def briefing(store: CoopStore, agent: str) -> str:
     sections = [
-        protocol.instructions_for(agent),
+        protocol.instructions_for(agent, agent_role(store, agent)),
         render.section("Team", render.agents(store.list_agents(), time.time())),
         render.section("Open goals", render.goals(store.list_goals())),
         render.section("Your open tasks", render.tasks(store.list_tasks(assignee=agent, include_done=False))),

@@ -1,27 +1,46 @@
 import time
+from pathlib import Path
+from typing import Iterable, Optional
 
-from rich.console import Group, RenderableType
+from rich.console import Group
 from rich.text import Text
 from textual import events
-from textual.app import App, ComposeResult
-from textual.containers import Horizontal, VerticalScroll
+from textual.app import App, ComposeResult, SystemCommand
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import Screen
 from textual.suggester import SuggestFromList
-from textual.widgets import Footer, Input, Static
+from textual.widgets import Footer, Input, OptionList, Static
+from textual.widgets.option_list import Option
 
-from . import pretty
+from . import events as coop_events
+from . import launch, pretty, providers, render
 from .errors import CoopError
 from .models import Agent, Message
-from .store import EVERYONE, USER, CoopStore
+from .screens import AgentDraft, AgentForm, GoalDraft, GoalForm
+from .store import EVERYONE, OFFLINE, USER, CoopStore
 
 REFRESH_SECONDS = 1.0
 SIDEBAR_MIN_TERMINAL_WIDTH = 100
+STARTING_GRACE_SECONDS = 90
+NEW_AGENT_OPTION = "+new-agent"
 
 COMPOSER_HINT = "Message everyone, or start with @agent to message one agent  ·  Enter to send"
-EMPTY_CONVERSATION_HINT = "Nothing said yet. Type below, or give the agents a goal with `a2a-coop goal add`."
+ANSWER_HINT = "Nothing to answer"
+EMPTY_CONVERSATION_HINT = "Nothing said yet. Give the agents a goal with Ctrl+G, then start them from the team list."
+NO_QUESTIONS_HINT = "No open questions. When an agent asks you something, it is pinned here."
+
+GOAL_ACTIONS = (
+    ("pause", "paused", ("active",)),
+    ("resume", "active", ("paused",)),
+    ("mark done", "done", ("active", "paused")),
+    ("cancel", "cancelled", ("active", "paused")),
+)
 
 CSS = """
 #team {
     height: auto;
+    max-height: 10;
     border: round gray;
     border-title-align: left;
     border-subtitle-align: right;
@@ -39,8 +58,38 @@ CSS = """
     padding: 0 1;
 }
 
-#sidebar {
+#side {
     width: 1fr;
+}
+
+#questions-panel {
+    height: auto;
+    max-height: 60%;
+    border: round gray;
+    border-title-align: left;
+    border-subtitle-align: right;
+    padding: 0 1;
+}
+
+#questions-panel.waiting {
+    border: heavy $warning;
+    border-title-color: $warning;
+    border-title-style: bold;
+}
+
+#questions {
+    height: auto;
+    max-height: 20;
+    border: none;
+    padding: 0;
+}
+
+#no-questions {
+    color: gray;
+}
+
+#sidebar {
+    height: 1fr;
     border: round gray;
     border-title-align: left;
     padding: 0 1;
@@ -56,32 +105,53 @@ CSS = """
 """
 
 
+class QuestionList(OptionList):
+    BINDINGS = [Binding("d,delete", "app.dismiss_question", "Dismiss")]
+
+
 class CoopDashboard(App):
     TITLE = "a2a-coop"
     CSS = CSS
 
     BINDINGS = [
-        ("ctrl+q", "quit", "Quit"),
-        ("pageup", "scroll_conversation(-1)", "Scroll up"),
-        ("pagedown", "scroll_conversation(1)", "Scroll down"),
+        Binding("ctrl+g", "new_goal", "New goal", priority=True),
+        Binding("ctrl+n", "new_agent", "New agent", priority=True),
+        Binding("ctrl+t", "focus_team", "Start agents", priority=True),
+        Binding("ctrl+r", "focus_answer", "Answer", priority=True),
+        Binding("escape", "focus_composer", "Back", show=False),
+        Binding("ctrl+q", "quit", "Quit"),
+        Binding("pageup", "scroll_conversation(-1)", "Scroll up", show=False),
+        Binding("pagedown", "scroll_conversation(1)", "Scroll down", show=False),
     ]
 
-    def __init__(self, store: CoopStore, backlog: int):
+    def __init__(self, store: CoopStore, backlog: int, workdir: Optional[Path] = None):
         super().__init__()
         self.store = store
         self.backlog = backlog
+        self.workdir = workdir or Path.cwd()
         self.last_message_id = 0
         self.known_agents: tuple[str, ...] = ()
+        self.agents: list[Agent] = []
+        self.question_ids: Optional[tuple[int, ...]] = None
+        self.questions: list[Message] = []
+        self.starting: dict[str, float] = {}
+        self.wide = True
 
     def compose(self) -> ComposeResult:
-        yield Static(id="team")
+        yield OptionList(id="team")
 
         with Horizontal(id="main"):
             with VerticalScroll(id="conversation"):
                 yield Static(EMPTY_CONVERSATION_HINT, id="empty-hint")
 
-            with VerticalScroll(id="sidebar"):
-                yield Static(id="goals")
+            with Vertical(id="side"):
+                with Vertical(id="questions-panel"):
+                    yield Static(NO_QUESTIONS_HINT, id="no-questions")
+                    yield QuestionList(id="questions")
+                    yield Input(placeholder=ANSWER_HINT, id="answer", disabled=True)
+
+                with VerticalScroll(id="sidebar"):
+                    yield Static(id="goals")
 
         yield Input(placeholder=COMPOSER_HINT, id="composer")
         yield Footer()
@@ -97,18 +167,64 @@ class CoopDashboard(App):
         self.query_one("#composer", Input).focus()
 
     def on_resize(self, event: events.Resize) -> None:
-        self.query_one("#sidebar").display = event.size.width >= SIDEBAR_MIN_TERMINAL_WIDTH
+        self.wide = event.size.width >= SIDEBAR_MIN_TERMINAL_WIDTH
+        self.update_layout()
+
+    def update_layout(self) -> None:
+        has_questions = bool(self.question_ids)
+
+        self.query_one("#sidebar").display = self.wide
+        self.query_one("#side").display = self.wide or has_questions
+
+    def label_panels(self) -> None:
+        self.query_one("#team").border_title = "a2a-coop · team  (Enter on an agent starts it)"
+        self.query_one("#conversation").border_title = "conversation"
+        self.query_one("#questions-panel").border_title = "questions for you"
+        self.query_one("#sidebar").border_title = "goals & tasks"
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        recipient, body = parse_composer(event.value)
+        if event.input.id == "answer":
+            self.answer(event.input)
+        elif event.input.id == "composer":
+            self.compose_message(event.input)
+
+    def compose_message(self, composer: Input) -> None:
+        recipient, body = parse_composer(composer.value)
 
         if not body:
             self.notify("Type a message after the @name.", severity="warning")
             return
 
-        if self.send(recipient, body):
-            event.input.clear()
+        if self.attempt(lambda: self.store.send_message(USER, recipient, body)):
+            composer.clear()
             self.refresh_dashboard()
+
+    def answer(self, answer_box: Input) -> None:
+        target = self.selected_question()
+        text = answer_box.value.strip()
+
+        if target is None or not text:
+            return
+
+        if self.attempt(lambda: self.store.answer_question(target, text)):
+            answer_box.clear()
+            self.refresh_dashboard()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "team":
+            self.team_option_selected(event.option.id)
+        elif event.option_list.id == "questions":
+            self.query_one("#answer", Input).focus()
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_list.id == "questions":
+            self.update_answer_hint()
+
+    def team_option_selected(self, option_id: Optional[str]) -> None:
+        if option_id == NEW_AGENT_OPTION:
+            self.action_new_agent()
+        elif option_id:
+            self.start_agent(option_id)
 
     def action_scroll_conversation(self, direction: int) -> None:
         conversation = self.query_one("#conversation", VerticalScroll)
@@ -118,19 +234,117 @@ class CoopDashboard(App):
         else:
             conversation.scroll_page_down()
 
-    def send(self, recipient: str, body: str) -> bool:
+    def action_focus_composer(self) -> None:
+        self.query_one("#composer", Input).focus()
+
+    def action_focus_team(self) -> None:
+        self.query_one("#team", OptionList).focus()
+
+    def action_focus_answer(self) -> None:
+        if not self.question_ids:
+            self.notify("No questions are waiting for you.")
+            return
+
+        self.query_one("#answer", Input).focus()
+
+    def action_dismiss_question(self) -> None:
+        target = self.selected_question()
+
+        if target is not None and self.attempt(lambda: self.store.dismiss_question(target)):
+            self.refresh_dashboard()
+
+    def action_new_goal(self) -> None:
+        if not isinstance(self.screen, (GoalForm, AgentForm)):
+            self.push_screen(GoalForm(self.create_goal))
+
+    def action_new_agent(self) -> None:
+        if not isinstance(self.screen, (GoalForm, AgentForm)):
+            taken = {agent.name for agent in self.agents}
+            self.push_screen(AgentForm(self.create_agent, taken, self.workdir))
+
+    def create_goal(self, draft: GoalDraft) -> bool:
+        def create() -> None:
+            goal = self.store.create_goal(draft.title, draft.description)
+            self.store.announce(USER, coop_events.goal_created(goal))
+
+        created = self.attempt(create)
+
+        if created:
+            self.refresh_dashboard()
+
+        return created
+
+    def create_agent(self, draft: AgentDraft) -> bool:
+        def define() -> None:
+            workdir = providers.normalize_workdir(draft.workdir)
+            self.store.define_agent(draft.name, draft.provider, draft.role, workdir)
+
+        if not self.attempt(define):
+            return False
+
+        self.notify(f"Added agent {draft.name}.")
+        self.refresh_dashboard()
+
+        if draft.start:
+            self.call_after_refresh(self.start_agent, draft.name)
+
+        return True
+
+    def start_agent(self, name: str, force: bool = False) -> None:
         try:
-            self.store.send_message(USER, recipient, body)
+            agent = self.store.get_agent(name)
+
+            if not force and render.is_online(agent, time.time()):
+                self.notify(f"{name} is already running. Use the command palette (Ctrl+P) to start another copy.")
+                return
+
+            where = launch.start_in_window(self.store.path, agent, self.workdir)
+        except CoopError as error:
+            self.notify(str(error), severity="error", timeout=10)
+            return
+
+        self.starting[name] = time.time()
+        self.notify(f"Starting {name} in {where}.")
+        self.refresh_dashboard()
+
+    def set_goal_status(self, goal_id: int, status: str) -> None:
+        def change() -> None:
+            goal = self.store.set_goal_status(goal_id, status)
+            self.store.announce(USER, coop_events.goal_status_changed(goal))
+
+        if self.attempt(change):
+            self.refresh_dashboard()
+
+    def remove_agent(self, name: str) -> None:
+        if self.attempt(lambda: self.store.remove_agent(name)):
+            self.notify(f"Removed {name}.")
+            self.refresh_dashboard()
+
+    def attempt(self, action) -> bool:
+        try:
+            action()
         except CoopError as error:
             self.notify(str(error), severity="error")
             return False
 
         return True
 
-    def label_panels(self) -> None:
-        self.query_one("#team").border_title = "a2a-coop · team"
-        self.query_one("#conversation").border_title = "conversation"
-        self.query_one("#sidebar").border_title = "goals & tasks"
+    def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
+        yield from super().get_system_commands(screen)
+        yield SystemCommand("New goal", "Give the agents a new goal", self.action_new_goal)
+        yield SystemCommand("New agent", "Create an agent with its own provider and role", self.action_new_agent)
+
+        for agent in self.agents:
+            yield from agent_commands(self, agent)
+
+        for goal in self.store.list_goals():
+            for label, status, allowed in GOAL_ACTIONS:
+                if goal.status in allowed:
+                    yield SystemCommand(
+                        f"Goal #{goal.id}: {label}",
+                        goal.title,
+                        lambda goal_id=goal.id, status=status: self.set_goal_status(goal_id, status),
+                    )
 
     def show_backlog(self) -> None:
         recent = self.store.recent_messages(self.backlog) if self.backlog > 0 else []
@@ -142,10 +356,11 @@ class CoopDashboard(App):
         self.show_messages(self.store.messages_after(self.last_message_id))
         self.store.take_unread(USER)
 
-        agents = self.store.list_agents()
+        self.agents = self.store.list_agents()
 
-        self.show_team(agents)
-        self.update_suggestions(agents)
+        self.show_team(self.agents)
+        self.update_suggestions(self.agents)
+        self.show_questions(self.store.open_questions())
         self.show_goals()
 
     def show_messages(self, messages: list[Message]) -> None:
@@ -162,10 +377,30 @@ class CoopDashboard(App):
 
     def show_team(self, agents: list[Agent]) -> None:
         now = time.time()
-        team = self.query_one("#team", Static)
+        team = self.query_one("#team", OptionList)
+        highlighted = team.highlighted_option.id if team.highlighted_option else None
 
-        team.update(team_view(agents, now))
+        self.forget_started_agents(agents, now)
+        options = [Option(self.agent_prompt(agent, now), id=agent.name) for agent in agents]
+        options.append(Option(Text("+ add an agent (Ctrl+N)", style="dim"), id=NEW_AGENT_OPTION))
+
+        team.set_options(options)
+        restore_highlight(team, highlighted)
         team.border_subtitle = time.strftime("%H:%M:%S", time.localtime(now))
+
+    def agent_prompt(self, agent: Agent, now: float) -> Text:
+        return pretty.agent_row(agent, now, starting=agent.name in self.starting)
+
+    def forget_started_agents(self, agents: list[Agent], now: float) -> None:
+        for agent in agents:
+            started = self.starting.get(agent.name)
+
+            if started is None:
+                continue
+
+            joined = agent.activity != OFFLINE and agent.last_seen >= started
+            if joined or now - started > STARTING_GRACE_SECONDS:
+                del self.starting[agent.name]
 
     def update_suggestions(self, agents: list[Agent]) -> None:
         names = tuple(agent.name for agent in agents)
@@ -177,18 +412,94 @@ class CoopDashboard(App):
         mentions = [f"@{name} " for name in names]
         self.query_one("#composer", Input).suggester = SuggestFromList(mentions, case_sensitive=False)
 
+    def show_questions(self, questions: list[Message]) -> None:
+        ids = tuple(question.id for question in questions)
+
+        if ids == self.question_ids:
+            return
+
+        self.announce_new_questions(questions)
+        self.question_ids = ids
+        self.questions = questions
+
+        listing = self.query_one("#questions", OptionList)
+        highlighted = listing.highlighted_option.id if listing.highlighted_option else None
+        listing.set_options(Option(pretty.question(question), id=str(question.id)) for question in questions)
+        restore_highlight(listing, highlighted)
+
+        panel = self.query_one("#questions-panel")
+        panel.set_class(bool(questions), "waiting")
+        panel.border_title = f"questions for you ({len(questions)})" if questions else "questions for you"
+        panel.border_subtitle = "↑↓ pick · d dismiss" if len(questions) > 1 else ("d dismiss" if questions else "")
+        listing.display = bool(questions)
+        self.query_one("#no-questions").display = not questions
+        self.query_one("#answer", Input).disabled = not questions
+
+        self.update_answer_hint()
+        self.update_layout()
+
+    def announce_new_questions(self, questions: list[Message]) -> None:
+        if self.question_ids is None:
+            return
+
+        for question in questions:
+            if question.id not in self.question_ids:
+                self.bell()
+                self.notify(first_line(question.body), title=f"{question.sender} asks you", timeout=10)
+
+    def selected_question(self) -> Optional[int]:
+        listing = self.query_one("#questions", OptionList)
+
+        if listing.option_count == 0:
+            return None
+
+        option = listing.highlighted_option or listing.get_option_at_index(0)
+
+        return int(option.id)
+
+    def update_answer_hint(self) -> None:
+        target = self.selected_question()
+        answer_box = self.query_one("#answer", Input)
+
+        if target is None:
+            answer_box.placeholder = ANSWER_HINT
+            return
+
+        sender = next((question.sender for question in self.questions if question.id == target), "")
+        answer_box.placeholder = f"Answer #{target} ({sender}), Enter sends"
+
     def show_goals(self) -> None:
         goals = [(goal, self.store.list_tasks(goal_id=goal.id)) for goal in self.store.list_goals()]
         blocks = [pretty.goal_block(goal, tasks) for goal, tasks in goals]
+        empty = Text("No open goals. Press Ctrl+G to add one.", style="dim")
 
-        self.query_one("#goals", Static).update(Group(*blocks) if blocks else Text("No open goals.", style="dim"))
+        self.query_one("#goals", Static).update(Group(*blocks) if blocks else empty)
 
 
-def team_view(agents: list[Agent], now: float) -> RenderableType:
-    if not agents:
-        return Text("No agents have joined yet.", style="dim")
+def agent_commands(app: CoopDashboard, agent: Agent) -> Iterable[SystemCommand]:
+    yield SystemCommand(
+        f"Start {agent.name}",
+        f"Open a terminal running {agent.provider or 'its provider'} as {agent.name}",
+        lambda name=agent.name: app.start_agent(name, force=True),
+    )
+    yield SystemCommand(
+        f"Remove {agent.name}",
+        "Remove the agent from the coop (it can be added again)",
+        lambda name=agent.name: app.remove_agent(name),
+    )
 
-    return Group(*(pretty.agent_row(agent, now) for agent in agents))
+
+def restore_highlight(listing: OptionList, option_id: Optional[str]) -> None:
+    ids = [listing.get_option_at_index(index).id for index in range(listing.option_count)]
+
+    if ids:
+        listing.highlighted = ids.index(option_id) if option_id in ids else 0
+
+
+def first_line(text: str) -> str:
+    line = text.strip().splitlines()[0] if text.strip() else ""
+
+    return line if len(line) <= 100 else line[:97] + "..."
 
 
 def parse_composer(text: str) -> tuple[str, str]:

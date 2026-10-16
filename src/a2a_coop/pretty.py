@@ -11,13 +11,12 @@ from rich.text import Text
 
 from . import render
 from .models import Agent, Goal, Message, Task
-from .store import EVENT, EVERYONE, OFFLINE, USER
+from .store import EVENT, EVERYONE, OFFLINE, QUESTION, USER
 
 AGENT_COLORS = ("cyan", "magenta", "yellow", "blue", "bright_red", "bright_cyan", "bright_magenta")
 USER_COLOR = "bright_green"
 EVERYONE_COLOR = "white"
-
-RECENTLY_SEEN_SECONDS = 120
+QUESTION_COLOR = "bright_yellow"
 
 TASK_MARKERS = {
     "todo": ("○", "white"),
@@ -62,20 +61,42 @@ def messages(items: Iterable[Message]) -> list[RenderableType]:
 
 
 def chat(item: Message) -> Panel:
+    is_question = item.kind == QUESTION
+
     return Panel(
         Markdown(item.body),
         title=chat_title(item),
         title_align="left",
-        subtitle=Text(render.clock(item.created_at), style="dim"),
+        subtitle=chat_subtitle(item),
         subtitle_align="right",
-        border_style=participant_color(item.sender),
+        border_style=QUESTION_COLOR if is_question else participant_color(item.sender),
         box=box.HEAVY if item.recipient == USER else box.ROUNDED,
         padding=(0, 1),
     )
 
 
 def chat_title(item: Message) -> Text:
-    return Text.assemble(" ", participant(item.sender), (" → ", "dim"), participant(item.recipient), " ")
+    verb = " asks " if item.kind == QUESTION else " → "
+    marker = ("? ", f"bold {QUESTION_COLOR}") if item.kind == QUESTION else ("", "")
+
+    return Text.assemble(" ", marker, participant(item.sender), (verb, "dim"), participant(item.recipient), " ")
+
+
+def chat_subtitle(item: Message) -> Text:
+    number = f"#{item.id} · " if item.kind == QUESTION else ""
+
+    return Text(f"{number}{render.clock(item.created_at)}", style="dim")
+
+
+def question(item: Message) -> Text:
+    header = Text.assemble(
+        (f"#{item.id} ", "dim"),
+        participant(item.sender),
+        (" asks", "dim"),
+        ("  " + render.clock(item.created_at), "dim"),
+    )
+
+    return Text.assemble(header, "\n", Text(item.body.strip(), style="bold"))
 
 
 def event(item: Message) -> Table:
@@ -98,22 +119,25 @@ def presence_style(agent: Agent, now: float) -> str:
     if render.is_listening(agent, now):
         return "green"
 
-    return "yellow" if now - agent.last_seen < RECENTLY_SEEN_SECONDS else "red"
+    return "yellow" if render.is_online(agent, now) else "red"
 
 
-def agent_row(agent: Agent, now: float) -> Text:
-    style = presence_style(agent, now)
+def agent_row(agent: Agent, now: float, starting: bool = False) -> Text:
+    style = "yellow" if starting else presence_style(agent, now)
     role = f" ({agent.role})" if agent.role else ""
+    provider = f" · {agent.provider}" if agent.provider else ""
+    presence = "starting…" if starting else render.presence(agent, now)
 
     text = Text.assemble(
         ("● ", style),
         participant(agent.name),
         (role, "dim"),
         ("  ", ""),
-        (render.presence(agent, now), style),
+        (presence, style),
+        (provider, "dim"),
     )
 
-    if agent.status:
+    if agent.status and not starting:
         text.append(f"  · {agent.status}")
 
     text.no_wrap = True

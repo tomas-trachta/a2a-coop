@@ -10,6 +10,8 @@ class Agent:
     activity: str
     joined_at: float
     last_seen: float
+    provider: str = ""
+    workdir: str = ""
 
 
 @dataclass(frozen=True)
@@ -43,3 +45,4 @@ class Message:
     body: str
     kind: str
     created_at: float
+    handled_at: Optional[float] = None
