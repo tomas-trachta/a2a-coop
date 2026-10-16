@@ -2,11 +2,12 @@ import time
 from typing import Callable, Iterable, TypeVar
 
 from .models import Agent, Goal, Message, Task
-from .store import EVENT, OFFLINE, WAITING
+from .store import EVENT, OFFLINE, QUESTION, WAITING
 
 T = TypeVar("T")
 
 LISTENING_FRESHNESS_SECONDS = 15
+ONLINE_FRESHNESS_SECONDS = 120
 
 
 def lines(items: Iterable[T], render_item: Callable[[T], str], empty: str) -> str:
@@ -39,6 +40,10 @@ def is_listening(agent: Agent, now: float) -> bool:
     return agent.activity == WAITING and now - agent.last_seen < LISTENING_FRESHNESS_SECONDS
 
 
+def is_online(agent: Agent, now: float) -> bool:
+    return agent.activity != OFFLINE and now - agent.last_seen < ONLINE_FRESHNESS_SECONDS
+
+
 def presence(agent: Agent, now: float) -> str:
     if agent.activity == OFFLINE:
         return "offline"
@@ -51,9 +56,11 @@ def presence(agent: Agent, now: float) -> str:
 
 def agent_line(agent: Agent, now: float) -> str:
     role = f" ({agent.role})" if agent.role else ""
+    provider = f" {agent.provider}" if agent.provider else ""
+    workdir = f" in {agent.workdir}" if agent.workdir else ""
     status = f" - {agent.status}" if agent.status else ""
 
-    return f"{agent.name}{role} [{presence(agent, now)}]{status}"
+    return f"{agent.name}{role} [{presence(agent, now)}]{provider}{workdir}{status}"
 
 
 def agents(items: Iterable[Agent], now: float) -> str:
@@ -111,6 +118,9 @@ def message_header(message: Message) -> str:
 
     if message.kind == EVENT:
         return f"{stamp} *"
+
+    if message.kind == QUESTION:
+        return f"{stamp} {message.sender} asks {message.recipient}:"
 
     return f"{stamp} {message.sender} -> {message.recipient}:"
 

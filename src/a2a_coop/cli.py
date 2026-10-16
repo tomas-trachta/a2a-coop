@@ -6,7 +6,7 @@ from typing import Optional
 
 from rich.console import Console
 
-from . import connect, events, pretty, render, server, tui
+from . import connect, events, launch, pretty, providers, render, server, tui
 from .errors import CoopError
 from .models import Message
 from .paths import DB_ENV_VAR, default_db_path
@@ -31,7 +31,16 @@ def main(argv: Optional[list[str]] = None) -> None:
     try:
         args.handler(CoopStore(args.db), args)
     except CoopError as error:
-        sys.exit(f"error: {error}")
+        exit_with_error(error, getattr(args, "hold", False))
+
+
+def exit_with_error(error: CoopError, hold: bool) -> None:
+    print(f"error: {error}", file=sys.stderr)
+
+    if hold:
+        input("Press Enter to close this window.")
+
+    sys.exit(1)
 
 
 def configure_console() -> None:
@@ -46,7 +55,8 @@ def expanded_path(value: str) -> Path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="a2a-coop",
-        description="Let AI agents such as Claude and Codex cooperate on goals you give them, over MCP.",
+        description="Let AI agents such as Claude and Codex cooperate on goals you give them, over MCP. "
+        "Run without a command to open the dashboard.",
     )
     parser.add_argument(
         "--db",
@@ -54,10 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=default_db_path(),
         help=f"shared coop database (default: %(default)s, overridable with ${DB_ENV_VAR})",
     )
-    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    parser.set_defaults(handler=watch_messages, backlog=50, stream=False, command=None)
+    commands = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     add_serve_command(commands)
     add_overview_commands(commands)
+    add_agent_commands(commands)
     add_goal_commands(commands)
     add_task_commands(commands)
     add_message_commands(commands)
@@ -69,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
 def add_serve_command(commands: argparse._SubParsersAction) -> None:
     serve = commands.add_parser("serve", help="run the MCP server for one agent (used by Claude/Codex, over stdio)")
     serve.add_argument("--agent", required=True, help="name of the connecting agent, e.g. claude or codex")
-    serve.add_argument("--role", default="", help="optional role or specialty shown to teammates")
+    serve.add_argument("--role", default="", help="role shown to teammates (default: keep the stored role)")
     serve.set_defaults(handler=run_server)
 
 
@@ -77,8 +89,43 @@ def add_overview_commands(commands: argparse._SubParsersAction) -> None:
     status = commands.add_parser("status", help="overview of agents, open goals and your inbox")
     status.set_defaults(handler=show_status)
 
-    agents = commands.add_parser("agents", help="list connected agents")
+    agents = commands.add_parser("agents", help="list agents (same as `agent list`)")
     agents.set_defaults(handler=show_agents)
+
+
+def add_agent_commands(commands: argparse._SubParsersAction) -> None:
+    agent = commands.add_parser("agent", help="create, start and manage agents").add_subparsers(
+        dest="agent_command", required=True, metavar="ACTION"
+    )
+
+    add = agent.add_parser("add", help="define a new agent, e.g. a second Claude with another role")
+    add.add_argument("name", nargs="?", help="agent name (default: derived from provider and role)")
+    add.add_argument("--provider", "-p", choices=list(providers.PROVIDERS), default="claude")
+    add.add_argument("--role", "-r", default="", help='what it does, e.g. "code reviewer"')
+    add.add_argument("--dir", dest="workdir", default="", help="working directory (default: where you start it)")
+    add.add_argument("--start", action="store_true", help="start it in a new terminal right away")
+    add.set_defaults(handler=add_agent)
+
+    listing = agent.add_parser("list", help="list agents")
+    listing.set_defaults(handler=show_agents)
+
+    edit = agent.add_parser("set", help="change an agent's role, provider or working directory")
+    edit.add_argument("name")
+    edit.add_argument("--provider", "-p", choices=list(providers.PROVIDERS))
+    edit.add_argument("--role", "-r")
+    edit.add_argument("--dir", dest="workdir")
+    edit.set_defaults(handler=edit_agent)
+
+    start = agent.add_parser("start", help="start an agent in a new terminal window (or here with --here)")
+    start.add_argument("name")
+    start.add_argument("--here", action="store_true", help="run it in this terminal")
+    start.add_argument("--dir", dest="workdir", type=expanded_path, help=argparse.SUPPRESS)
+    start.add_argument("--hold", action="store_true", help=argparse.SUPPRESS)
+    start.set_defaults(handler=start_agent)
+
+    remove = agent.add_parser("remove", aliases=["rm"], help="remove an agent from the coop")
+    remove.add_argument("name")
+    remove.set_defaults(handler=kick_agent)
 
 
 def add_goal_commands(commands: argparse._SubParsersAction) -> None:
@@ -162,6 +209,18 @@ def add_message_commands(commands: argparse._SubParsersAction) -> None:
     inbox = commands.add_parser("inbox", help="show unread messages addressed to you")
     inbox.set_defaults(handler=show_inbox)
 
+    questions = commands.add_parser("questions", help="open questions the agents asked you")
+    questions.set_defaults(handler=show_questions)
+
+    answer = commands.add_parser("answer", help="answer a question by its number")
+    answer.add_argument("message_id", type=int)
+    answer.add_argument("text", nargs="+")
+    answer.set_defaults(handler=answer_question)
+
+    dismiss = commands.add_parser("dismiss", help="close questions without answering them")
+    dismiss.add_argument("message_ids", type=int, nargs="+", metavar="message_id")
+    dismiss.set_defaults(handler=dismiss_questions)
+
     log = commands.add_parser("log", help="show recent coop messages")
     log.add_argument("-n", "--limit", type=int, default=30)
     log.add_argument("--involving", help="only messages sent by or to this participant")
@@ -174,9 +233,10 @@ def add_message_commands(commands: argparse._SubParsersAction) -> None:
 
 
 def add_admin_commands(commands: argparse._SubParsersAction) -> None:
-    setup = commands.add_parser("setup", help="print how to connect Claude Code and Codex")
+    setup = commands.add_parser("setup", help="connect the installed Claude Code / Codex to the coop")
     setup.add_argument("--claude-name", default="claude")
     setup.add_argument("--codex-name", default="codex")
+    setup.add_argument("--print", action="store_true", help="only print the configuration, change nothing")
     setup.set_defaults(handler=show_setup)
 
     kick = commands.add_parser("kick", help="remove an agent from the coop")
@@ -198,6 +258,7 @@ def show_status(store: CoopStore, args: argparse.Namespace) -> None:
     print(render.section("Open goals", open_goals_overview(store)))
     print()
     print(f"Unread messages for you: {store.count_unread(USER)} (see `a2a-coop inbox`)")
+    print(f"Open questions for you: {len(store.open_questions())} (see `a2a-coop questions`)")
 
 
 def open_goals_overview(store: CoopStore) -> str:
@@ -211,6 +272,36 @@ def open_goals_overview(store: CoopStore) -> str:
 
 def show_agents(store: CoopStore, args: argparse.Namespace) -> None:
     print(render.agents(store.list_agents(), time.time()))
+
+
+def add_agent(store: CoopStore, args: argparse.Namespace) -> None:
+    taken = {agent.name for agent in store.list_agents()}
+    name = args.name or providers.suggested_name(args.provider, args.role, taken)
+    agent = store.define_agent(name, args.provider, args.role, providers.normalize_workdir(args.workdir))
+
+    print(f"Added {render.agent_line(agent, time.time())}")
+
+    if args.start:
+        print(f"Started {agent.name} in {launch.start_in_window(store.path, agent, Path.cwd())}.")
+    else:
+        print(f"Start it with `a2a-coop agent start {agent.name}` or from the dashboard.")
+
+
+def edit_agent(store: CoopStore, args: argparse.Namespace) -> None:
+    workdir = providers.normalize_workdir(args.workdir) if args.workdir is not None else None
+    agent = store.update_agent(args.name, role=args.role, provider=args.provider, workdir=workdir)
+
+    print(render.agent_line(agent, time.time()))
+
+
+def start_agent(store: CoopStore, args: argparse.Namespace) -> None:
+    agent = store.get_agent(args.name)
+    fallback = args.workdir or Path.cwd()
+
+    if args.here:
+        sys.exit(launch.run_here(store.path, agent, fallback))
+
+    print(f"Started {agent.name} in {launch.start_in_window(store.path, agent, fallback)}.")
 
 
 def add_goal(store: CoopStore, args: argparse.Namespace) -> None:
@@ -298,6 +389,21 @@ def show_inbox(store: CoopStore, args: argparse.Namespace) -> None:
     print_cards(store.take_unread(USER), "No unread messages.")
 
 
+def show_questions(store: CoopStore, args: argparse.Namespace) -> None:
+    print_cards(store.open_questions(), "No open questions.")
+
+
+def answer_question(store: CoopStore, args: argparse.Namespace) -> None:
+    print_cards([store.answer_question(args.message_id, " ".join(args.text))], "")
+
+
+def dismiss_questions(store: CoopStore, args: argparse.Namespace) -> None:
+    for message_id in args.message_ids:
+        store.dismiss_question(message_id)
+
+        print(f"Dismissed #{message_id}.")
+
+
 def show_log(store: CoopStore, args: argparse.Namespace) -> None:
     print_cards(store.recent_messages(args.limit, args.involving), "No messages.")
 
@@ -316,6 +422,7 @@ def watch_messages(store: CoopStore, args: argparse.Namespace) -> None:
     if args.stream or not sys.stdout.isatty():
         stream_messages(store, args.backlog)
     else:
+        launch.ensure_default_agents(store)
         tui.watch(store, args.backlog)
 
 
@@ -344,7 +451,18 @@ def print_new_cards(console: Console, messages: list[Message], last_id: int) -> 
 
 
 def show_setup(store: CoopStore, args: argparse.Namespace) -> None:
-    print(connect.setup_text(args.db, args.claude_name, args.codex_name))
+    if args.print:
+        print(connect.setup_text(args.db, args.claude_name, args.codex_name))
+        return
+
+    for line in connect.configure_clients(args.db, args.claude_name, args.codex_name):
+        print(line)
+
+    for agent in launch.ensure_default_agents(store):
+        print(f"Added agent {agent.name} ({agent.provider}).")
+
+    print()
+    print("Open the dashboard with `a2a-coop` and start agents from there (select one, press Enter).")
 
 
 def kick_agent(store: CoopStore, args: argparse.Namespace) -> None:

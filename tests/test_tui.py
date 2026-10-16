@@ -73,3 +73,77 @@ async def test_sidebar_hides_on_narrow_terminals(team):
         sidebar_shown = pilot.app.query_one("#sidebar").display
 
     assert sidebar_shown is False
+
+
+async def test_questions_are_pinned_and_answered_from_their_own_box(team):
+    question = team.ask_user("claude", "Which database?")
+
+    async with CoopDashboard(team, 50).run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        listed = pilot.app.query_one("#questions").option_count
+
+        await pilot.press("ctrl+r")
+        pilot.app.query_one("#answer", Input).value = "SQLite"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        remaining = pilot.app.query_one("#questions").option_count
+
+    assert listed == 1
+    assert remaining == 0
+    assert team.take_unread("claude")[-1].body.startswith(f"Answer to #{question.id}")
+
+
+async def test_questions_stay_visible_on_narrow_terminals(team):
+    team.ask_user("claude", "Ship it?")
+
+    async with CoopDashboard(team, 50).run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+
+        side_shown = pilot.app.query_one("#side").display
+
+    assert side_shown is True
+
+
+async def test_goal_form_creates_a_goal(team):
+    async with CoopDashboard(team, 50).run_test(size=(120, 40)) as pilot:
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        pilot.app.screen.query_one("#title", Input).value = "Grappling hook"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+    assert [goal.title for goal in team.list_goals()] == ["Grappling hook"]
+    assert "user set a new goal #1: Grappling hook" in [message.body for message in team.recent_messages()]
+
+
+async def test_agent_form_creates_and_starts_an_agent(team, tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr("a2a_coop.launch.start_in_window", lambda db, agent, fallback: started.append(agent.name) or "test")
+
+    async with CoopDashboard(team, 50, workdir=tmp_path).run_test(size=(120, 40)) as pilot:
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        pilot.app.screen.query_one("#role", Input).value = "reviewer"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.pause()
+
+    created = [agent for agent in team.list_agents() if agent.name not in ("claude", "codex")]
+
+    assert len(created) == 1
+    assert created[0].role == "reviewer" and created[0].workdir == str(tmp_path)
+    assert started == [created[0].name]
+
+
+async def test_enter_on_an_offline_agent_starts_it(store, monkeypatch):
+    started = []
+    monkeypatch.setattr("a2a_coop.launch.start_in_window", lambda db, agent, fallback: started.append(agent.name) or "test")
+    store.define_agent("codex", "codex")
+
+    async with CoopDashboard(store, 50).run_test(size=(120, 40)) as pilot:
+        await pilot.press("ctrl+t")
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert started == ["codex"]

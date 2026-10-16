@@ -78,3 +78,24 @@ def stdio_server(tmp_path, agent: str) -> StdioServerParameters:
     arguments = ["-m", "a2a_coop", "--db", str(tmp_path / "coop.db"), "serve", "--agent", agent]
 
     return StdioServerParameters(command=sys.executable, args=arguments)
+
+
+async def test_ask_user_pins_a_question_and_role_reaches_the_instructions(store):
+    store.define_agent("claude-reviewer", "claude", "code reviewer")
+
+    async with Client(build_server(store, "claude-reviewer")) as reviewer:
+        asked = await reviewer.call_tool("ask_user", {"question": "Merge now?"})
+        briefing = await reviewer.call_tool("get_briefing", {})
+
+    assert "question #" in text_of(asked)
+    assert [request.body for request in store.open_questions()] == ["Merge now?"]
+    assert "Your role in this team: code reviewer" in text_of(briefing)
+
+
+async def test_tool_names_constant_matches_the_server(team):
+    from a2a_coop.protocol import TOOL_NAMES
+
+    async with Client(build_server(team, "claude")) as claude:
+        tools = {tool.name for tool in (await claude.list_tools()).tools}
+
+    assert tools == set(TOOL_NAMES)

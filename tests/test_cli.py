@@ -37,3 +37,27 @@ def test_goal_edit_and_remove_from_the_cli(tmp_path):
     assert [goal.title for goal in store.list_goals()] == ["Other"]
     assert store.list_tasks() == []
     assert "user removed goal #1 and its 1 task(s): Grappling hook" in events
+
+
+def test_agents_and_questions_from_the_cli(tmp_path, capsys):
+    db = tmp_path / "coop.db"
+    run(db, "agent", "add", "--provider", "codex", "--role", "test writer", "--dir", str(tmp_path))
+
+    store = CoopStore(db)
+    question = store.ask_user("codex-test-writer", "Which framework?")
+    run(db, "questions")
+    run(db, "answer", str(question.id), "pytest", "please")
+
+    added = store.get_agent("codex-test-writer")
+    output = capsys.readouterr().out
+
+    assert (added.provider, added.role, added.workdir) == ("codex", "test writer", str(tmp_path))
+    assert "Which framework?" in output
+    assert store.open_questions() == []
+    assert store.take_unread("codex-test-writer")[-1].body.endswith("pytest please")
+
+
+def test_no_command_opens_the_dashboard():
+    from a2a_coop.cli import build_parser, watch_messages
+
+    assert build_parser().parse_args([]).handler is watch_messages

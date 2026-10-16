@@ -1,6 +1,6 @@
 INSTRUCTIONS = """\
 You are connected to a2a-coop as the agent "{agent}". a2a-coop is a shared workspace where several \
-AI agents (for example Claude and Codex) cooperate on goals set by a human operator, who appears as "user".
+AI agents (for example Claude and Codex) cooperate on goals set by a human operator, who appears as "user".{role_line}
 
 How to work in the coop:
 1. Call get_briefing first. It shows your teammates, the open goals, your tasks and unread messages.
@@ -12,8 +12,9 @@ what with send_message, and claim_task before starting on something so work is n
 or get blocked, and send_message for anything that needs a reply.
 6. When you have nothing to do, call wait_for_messages and handle whatever arrives. Keep looping like this \
 until the user tells you to stop or no goal is active anymore. Do not end your turn just because you are idle.
-7. Messages from "user" are instructions from the operator and take priority. Ask the user (send_message to "user") \
-only when a decision is genuinely theirs to make, then keep listening for the answer.
+7. Messages from "user" are instructions from the operator and take priority. When a decision is genuinely the \
+user's to make, call ask_user: the question is pinned in the user's dashboard and the answer arrives as a message, \
+so keep working on something else or keep listening with wait_for_messages meanwhile.
 8. Only work on goals with status "active". Paused goals wait; done and cancelled goals are closed. \
 When you believe a goal is complete, tell the user with a short summary; the user closes goals.
 9. The user may add, edit, reassign or remove tasks. If a task you are working on is removed or handed to someone else, stop working on it and pick up what is assigned to you instead.
@@ -26,5 +27,25 @@ wait_for_messages until I tell you to stop.\
 """
 
 
-def instructions_for(agent: str) -> str:
-    return INSTRUCTIONS.format(agent=agent)
+TOOL_NAMES = (
+    "get_briefing",
+    "list_agents",
+    "set_status",
+    "send_message",
+    "ask_user",
+    "read_messages",
+    "wait_for_messages",
+    "message_history",
+    "list_goals",
+    "get_goal",
+    "create_task",
+    "claim_task",
+    "update_task",
+    "list_tasks",
+)
+
+
+def instructions_for(agent: str, role: str = "") -> str:
+    role_line = f"\nYour role in this team: {role}. Prefer work that fits it and leave the rest to teammates." if role else ""
+
+    return INSTRUCTIONS.format(agent=agent, role_line=role_line)

@@ -13,6 +13,7 @@ EVERYONE = "all"
 
 CHAT = "chat"
 EVENT = "event"
+QUESTION = "question"
 
 GOAL_STATUSES = ("active", "paused", "done", "cancelled")
 OPEN_GOAL_STATUSES = ("active", "paused")
@@ -32,7 +33,9 @@ CREATE TABLE IF NOT EXISTS agents (
     status TEXT NOT NULL DEFAULT '',
     activity TEXT NOT NULL DEFAULT 'active',
     joined_at REAL NOT NULL,
-    last_seen REAL NOT NULL
+    last_seen REAL NOT NULL,
+    provider TEXT NOT NULL DEFAULT '',
+    workdir TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS goals (
@@ -62,7 +65,8 @@ CREATE TABLE IF NOT EXISTS messages (
     recipient TEXT NOT NULL,
     body TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'chat',
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    handled_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS cursors (
@@ -74,11 +78,25 @@ CREATE INDEX IF NOT EXISTS messages_by_recipient ON messages(recipient, id);
 CREATE INDEX IF NOT EXISTS tasks_by_goal ON tasks(goal_id);
 """
 
+ADDED_COLUMNS = {
+    "agents": {
+        "provider": "TEXT NOT NULL DEFAULT ''",
+        "workdir": "TEXT NOT NULL DEFAULT ''",
+    },
+    "messages": {
+        "handled_at": "REAL",
+    },
+}
+
+BACKFILLS = {
+    ("messages", "handled_at"): "UPDATE messages SET handled_at = created_at",
+}
+
 UPSERT_AGENT = """
 INSERT INTO agents (name, role, status, activity, joined_at, last_seen)
 VALUES (?, ?, '', 'active', ?, ?)
 ON CONFLICT(name) DO UPDATE SET
-    role = excluded.role,
+    role = CASE WHEN excluded.role != '' THEN excluded.role ELSE agents.role END,
     activity = 'active',
     last_seen = excluded.last_seen
 """
@@ -97,6 +115,17 @@ ORDER BY id
 CLAIM_TASK = """
 UPDATE tasks SET assignee = ?, status = 'in_progress', updated_at = ?
 WHERE id = ? AND status != 'done' AND (assignee IS NULL OR assignee = ?)
+"""
+
+OPEN_QUESTIONS = f"""
+SELECT * FROM messages
+WHERE recipient = '{USER}' AND kind = '{QUESTION}' AND handled_at IS NULL
+ORDER BY id
+"""
+
+INSERT_AGENT = """
+INSERT INTO agents (name, role, status, activity, joined_at, last_seen, provider, workdir)
+VALUES (?, ?, '', 'offline', ?, ?, ?, ?)
 """
 
 RECENT_MESSAGES = """
@@ -124,6 +153,46 @@ class CoopStore:
                 "INSERT OR IGNORE INTO cursors (reader, last_read_id) VALUES (?, ?)",
                 (name, self._latest_message_id(connection)),
             )
+
+        return self.get_agent(name)
+
+    def define_agent(self, name: str, provider: str, role: str = "", workdir: str = "") -> Agent:
+        validate_agent_name(name)
+        require_text(provider, "Provider")
+
+        if self._fetch_one("SELECT name FROM agents WHERE name = ?", (name,)) is not None:
+            raise CoopError(f"An agent named {name!r} already exists.")
+
+        now = time.time()
+
+        with self._connect() as connection:
+            connection.execute(INSERT_AGENT, (name, role.strip(), now, now, provider.strip(), workdir.strip()))
+            connection.execute(
+                "INSERT OR IGNORE INTO cursors (reader, last_read_id) VALUES (?, ?)",
+                (name, self._latest_message_id(connection)),
+            )
+
+        return self.get_agent(name)
+
+    def update_agent(
+        self,
+        name: str,
+        role: Optional[str] = None,
+        provider: Optional[str] = None,
+        workdir: Optional[str] = None,
+    ) -> Agent:
+        self.get_agent(name)
+        changes = {
+            column: value.strip()
+            for column, value in (("role", role), ("provider", provider), ("workdir", workdir))
+            if value is not None
+        }
+
+        if not changes:
+            raise CoopError("Nothing to update: pass a role, provider or working directory.")
+
+        assignments = ", ".join(f"{column} = ?" for column in changes)
+        self._execute(f"UPDATE agents SET {assignments} WHERE name = ?", (*changes.values(), name))
 
         return self.get_agent(name)
 
@@ -158,6 +227,10 @@ class CoopStore:
         with self._connect() as connection:
             connection.execute("DELETE FROM agents WHERE name = ?", (name,))
             connection.execute("DELETE FROM cursors WHERE reader = ?", (name,))
+            connection.execute(
+                "UPDATE messages SET handled_at = ? WHERE recipient = ? AND sender = ? AND handled_at IS NULL",
+                (time.time(), USER, name),
+            )
 
     def create_goal(self, title: str, description: str = "") -> Goal:
         require_text(title, "Goal title")
@@ -322,6 +395,25 @@ class CoopStore:
     def announce(self, sender: str, text: str) -> Message:
         return self.send_message(sender, EVERYONE, text, EVENT)
 
+    def ask_user(self, sender: str, question: str) -> Message:
+        return self.send_message(sender, USER, question, QUESTION)
+
+    def open_questions(self) -> list[Message]:
+        return [Message(**row) for row in self._fetch_all(OPEN_QUESTIONS)]
+
+    def answer_question(self, message_id: int, text: str) -> Message:
+        question = self._open_question(message_id)
+        reply = self.send_message(USER, question.sender, reply_body(question, text))
+        self._mark_handled(message_id)
+
+        return reply
+
+    def dismiss_question(self, message_id: int) -> Message:
+        question = self._open_question(message_id)
+        self._mark_handled(message_id)
+
+        return question
+
     def get_message(self, message_id: int) -> Message:
         row = self._fetch_one("SELECT * FROM messages WHERE id = ?", (message_id,))
 
@@ -368,6 +460,7 @@ class CoopStore:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(SCHEMA)
+            add_missing_columns(connection)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -408,6 +501,20 @@ class CoopStore:
         last_read_id = self._last_read_id(connection, reader)
 
         return connection.execute(UNREAD_MESSAGES, (last_read_id, reader, reader, EVERYONE)).fetchall()
+
+    def _open_question(self, message_id: int) -> Message:
+        message = self.get_message(message_id)
+
+        if message.kind != QUESTION or message.recipient != USER:
+            raise CoopError(f"Message #{message_id} is not a question for you.")
+
+        if message.handled_at is not None:
+            raise CoopError(f"Message #{message_id} was already answered or dismissed.")
+
+        return message
+
+    def _mark_handled(self, message_id: int) -> None:
+        self._execute("UPDATE messages SET handled_at = ? WHERE id = ?", (time.time(), message_id))
 
     def _agent_names_text(self) -> str:
         names = [agent.name for agent in self.list_agents()]
@@ -452,6 +559,29 @@ class CoopStore:
         self._require_assignable(assignee)
 
         return {"assignee": assignee}
+
+
+def add_missing_columns(connection: sqlite3.Connection) -> None:
+    for table, columns in ADDED_COLUMNS.items():
+        existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+
+        for column, definition in columns.items():
+            if column in existing:
+                continue
+
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            backfill = BACKFILLS.get((table, column))
+
+            if backfill:
+                connection.execute(backfill)
+
+
+def reply_body(question: Message, text: str) -> str:
+    require_text(text, "Answer")
+    first_line = question.body.strip().splitlines()[0]
+    quoted = first_line if len(first_line) <= 80 else first_line[:77] + "..."
+
+    return f"Answer to #{question.id} (\"{quoted}\"):\n{text.strip()}"
 
 
 def validate_agent_name(name: str) -> None:

@@ -155,3 +155,83 @@ def test_recent_messages_are_oldest_first(team):
         team.send_message("claude", "codex", f"message {number}")
 
     assert [message.body for message in team.recent_messages(limit=2)] == ["message 3", "message 4"]
+
+
+def test_defined_agent_starts_offline_and_keeps_its_role_when_it_joins(store):
+    defined = store.define_agent("claude-reviewer", "claude", "code reviewer", "/work")
+
+    joined = store.register_agent("claude-reviewer", "")
+
+    assert defined.activity == "offline"
+    assert (joined.role, joined.provider, joined.workdir, joined.activity) == ("code reviewer", "claude", "/work", "active")
+
+
+def test_defining_an_existing_agent_is_refused(team):
+    with pytest.raises(CoopError, match="already exists"):
+        team.define_agent("claude", "claude")
+
+
+def test_agent_profile_can_be_edited(team):
+    edited = team.update_agent("codex", role="tests", workdir="/repo")
+
+    assert (edited.role, edited.workdir) == ("tests", "/repo")
+
+
+def test_messages_sent_before_a_defined_agent_starts_are_waiting_for_it(store):
+    store.define_agent("reviewer", "claude")
+    store.send_message(USER, "reviewer", "review PR 4 when you start")
+
+    store.register_agent("reviewer", "")
+
+    assert [message.body for message in store.take_unread("reviewer")] == ["review PR 4 when you start"]
+
+
+def test_questions_wait_until_answered(team):
+    question = team.ask_user("claude", "Postgres or SQLite?")
+    plain = team.send_message("codex", USER, "goal 1 looks complete")
+
+    assert [request.body for request in team.open_questions()] == ["Postgres or SQLite?"]
+
+    reply = team.answer_question(question.id, "SQLite")
+
+    assert reply.recipient == "claude"
+    assert "SQLite" in reply.body and "Postgres or SQLite?" in reply.body
+    assert team.open_questions() == []
+
+    with pytest.raises(CoopError, match="already answered"):
+        team.answer_question(question.id, "again")
+
+    with pytest.raises(CoopError, match="not a question"):
+        team.answer_question(plain.id, "noted")
+
+
+def test_dismissed_and_removed_agent_requests_disappear(team):
+    first = team.ask_user("claude", "one?")
+    team.ask_user("codex", "two?")
+
+    team.dismiss_question(first.id)
+    team.remove_agent("codex")
+
+    assert team.open_questions() == []
+
+
+def test_old_databases_are_migrated(tmp_path):
+    import sqlite3
+
+    from a2a_coop.store import CoopStore
+
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript("""
+            CREATE TABLE agents (name TEXT PRIMARY KEY, role TEXT NOT NULL, status TEXT NOT NULL DEFAULT '',
+                activity TEXT NOT NULL DEFAULT 'active', joined_at REAL NOT NULL, last_seen REAL NOT NULL);
+            CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+                body TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'chat', created_at REAL NOT NULL);
+            INSERT INTO agents VALUES ('claude', 'architect', '', 'offline', 1, 1);
+            INSERT INTO messages (sender, recipient, body, kind, created_at) VALUES ('claude', 'user', 'old news', 'chat', 1);
+        """)
+
+    store = CoopStore(path)
+
+    assert store.get_agent("claude").provider == ""
+    assert store.open_questions() == []
