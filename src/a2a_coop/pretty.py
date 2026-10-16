@@ -89,11 +89,12 @@ def chat_subtitle(item: Message) -> Text:
 
 
 def question(item: Message) -> Text:
+    goal = f"  goal #{item.goal_id}" if item.goal_id is not None else ""
     header = Text.assemble(
         (f"#{item.id} ", "dim"),
         participant(item.sender),
         (" asks", "dim"),
-        ("  " + render.clock(item.created_at), "dim"),
+        ("  " + render.clock(item.created_at) + goal, "dim"),
     )
 
     return Text.assemble(header, "\n", Text(item.body.strip(), style="bold"))
@@ -182,3 +183,30 @@ def goal_block(goal: Goal, tasks: list[Task]) -> Group:
     )
 
     return Group(header, task_table(tasks), Text())
+
+
+def goal_entry(goal: Goal, tasks: list[Task], selected: bool, unseen: int) -> Text:
+    done = sum(task.status == "done" for task in tasks)
+    progress = f"  {done}/{len(tasks)}" if tasks else ""
+
+    return Text.assemble(
+        ("▸ " if selected else "  ", "bold"),
+        (f"#{goal.id} ", "dim"),
+        (goal.title, "bold" if selected else ""),
+        ("  ", ""),
+        (goal.status, GOAL_STATUS_STYLES.get(goal.status, "")),
+        (progress, "dim"),
+        unseen_badge(unseen),
+    )
+
+
+def general_entry(selected: bool, unseen: int) -> Text:
+    return Text.assemble(
+        ("▸ " if selected else "  ", "bold"),
+        ("general (no goal)", "bold" if selected else "dim"),
+        unseen_badge(unseen),
+    )
+
+
+def unseen_badge(unseen: int) -> Text:
+    return Text(f"  ● {unseen} new", style=f"bold {USER_COLOR}") if unseen else Text()

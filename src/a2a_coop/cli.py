@@ -204,6 +204,7 @@ def add_message_commands(commands: argparse._SubParsersAction) -> None:
     send = commands.add_parser("send", help="send a message to an agent, or to 'all'")
     send.add_argument("recipient")
     send.add_argument("text", nargs="+")
+    send.add_argument("--goal", dest="goal_id", type=int, help="file the message under this goal's conversation")
     send.set_defaults(handler=send_message)
 
     inbox = commands.add_parser("inbox", help="show unread messages addressed to you")
@@ -224,6 +225,7 @@ def add_message_commands(commands: argparse._SubParsersAction) -> None:
     log = commands.add_parser("log", help="show recent coop messages")
     log.add_argument("-n", "--limit", type=int, default=30)
     log.add_argument("--involving", help="only messages sent by or to this participant")
+    log.add_argument("--goal", dest="goal_id", type=int, help="only the conversation of this goal")
     log.set_defaults(handler=show_log)
 
     watch = commands.add_parser("watch", help="live dashboard with a message box (Ctrl+Q to quit)")
@@ -306,7 +308,7 @@ def start_agent(store: CoopStore, args: argparse.Namespace) -> None:
 
 def add_goal(store: CoopStore, args: argparse.Namespace) -> None:
     goal = store.create_goal(args.title, args.description)
-    store.announce(USER, events.goal_created(goal))
+    store.announce(USER, events.goal_created(goal), goal.id)
 
     print(f"Created {render.goal_line(goal)}")
 
@@ -321,14 +323,14 @@ def show_goal(store: CoopStore, args: argparse.Namespace) -> None:
 
 def set_goal_status(store: CoopStore, args: argparse.Namespace) -> None:
     goal = store.set_goal_status(args.goal_id, args.status)
-    store.announce(USER, events.goal_status_changed(goal))
+    store.announce(USER, events.goal_status_changed(goal), goal.id)
 
     print(render.goal_line(goal))
 
 
 def edit_goal(store: CoopStore, args: argparse.Namespace) -> None:
     goal = store.update_goal(args.goal_id, title=args.title, description=args.description)
-    store.announce(USER, events.goal_edited(goal))
+    store.announce(USER, events.goal_edited(goal), goal.id)
 
     print(render.goal_details(goal, store.list_tasks(goal_id=goal.id)))
 
@@ -345,7 +347,7 @@ def remove_goals(store: CoopStore, args: argparse.Namespace) -> None:
 
 def add_task(store: CoopStore, args: argparse.Namespace) -> None:
     task = store.create_task(args.goal_id, args.title, USER, args.description, args.assignee)
-    store.announce(USER, events.task_created(USER, task))
+    store.announce(USER, events.task_created(USER, task), task.goal_id)
 
     print(render.task_details(task))
 
@@ -364,7 +366,7 @@ def update_task(store: CoopStore, args: argparse.Namespace) -> None:
         description=args.description,
         unassign=args.unassign,
     )
-    store.announce(USER, events.task_updated(USER, task))
+    store.announce(USER, events.task_updated(USER, task), task.goal_id)
 
     print(render.task_details(task))
 
@@ -374,13 +376,13 @@ def remove_tasks(store: CoopStore, args: argparse.Namespace) -> None:
 
     for task in tasks:
         store.remove_task(task.id)
-        store.announce(USER, events.task_removed(USER, task))
+        store.announce(USER, events.task_removed(USER, task), task.goal_id)
 
         print(f"Removed {render.task_line(task)}")
 
 
 def send_message(store: CoopStore, args: argparse.Namespace) -> None:
-    message = store.send_message(USER, args.recipient, " ".join(args.text))
+    message = store.send_message(USER, args.recipient, " ".join(args.text), goal_id=args.goal_id)
 
     print_cards([message], "")
 
@@ -405,7 +407,11 @@ def dismiss_questions(store: CoopStore, args: argparse.Namespace) -> None:
 
 
 def show_log(store: CoopStore, args: argparse.Namespace) -> None:
-    print_cards(store.recent_messages(args.limit, args.involving), "No messages.")
+    if args.goal_id is not None:
+        store.get_goal(args.goal_id)
+        print_cards(store.goal_messages(args.goal_id, args.limit), "No messages for this goal.")
+    else:
+        print_cards(store.recent_messages(args.limit, args.involving), "No messages.")
 
 
 def print_cards(messages: list[Message], empty: str) -> None:

@@ -99,3 +99,27 @@ async def test_tool_names_constant_matches_the_server(team):
         tools = {tool.name for tool in (await claude.list_tools()).tools}
 
     assert tools == set(TOOL_NAMES)
+
+
+async def test_agent_messages_are_filed_under_the_goal_it_works_on(team):
+    first = team.create_goal("First")
+    second = team.create_goal("Second")
+    task = team.create_task(second.id, "Do it", "user")
+
+    async with Client(build_server(team, "claude")) as claude:
+        await claude.call_tool("send_message", {"to": "codex", "message": "explicit", "goal_id": first.id})
+        await claude.call_tool("claim_task", {"task_id": task.id})
+        await claude.call_tool("send_message", {"to": "codex", "message": "inferred"})
+        received = await team_receives(team, claude, second.id)
+
+    filed = {message.body: message.goal_id for message in team.recent_messages() if message.sender == "claude"}
+
+    assert filed["explicit"] == first.id
+    assert filed["inferred"] == second.id
+    assert f"[goal #{second.id}]" in received
+
+
+async def team_receives(team, client, goal_id: int) -> str:
+    team.send_message("user", "claude", "status?", goal_id=goal_id)
+
+    return text_of(await client.call_tool("read_messages", {}))

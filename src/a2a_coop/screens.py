@@ -6,13 +6,20 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, Label, Select, TextArea
+from textual.widgets import Button, Checkbox, Input, Label, OptionList, Select, TextArea
+from textual.widgets.option_list import Option
 
 from . import providers
 
 FORM_CSS = """
-GoalForm, AgentForm {
+GoalForm, AgentForm, GoalPicker {
     align: center middle;
+}
+
+GoalPicker OptionList {
+    height: auto;
+    max-height: 20;
+    border: none;
 }
 
 .dialog {
@@ -192,6 +199,34 @@ class AgentForm(ModalScreen[Optional[AgentDraft]]):
 
         if self.accept(draft):
             self.dismiss(draft)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class GoalPicker(ModalScreen[Optional[str]]):
+    DEFAULT_CSS = FORM_CSS
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, options: list[Option], selected: str):
+        super().__init__()
+        self.options = options
+        self.selected = selected
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog") as dialog:
+            dialog.border_title = "Open a goal's conversation"
+            dialog.border_subtitle = "Enter opens · Esc closes"
+            yield OptionList(*self.options, id="picker")
+
+    def on_mount(self) -> None:
+        picker = self.query_one("#picker", OptionList)
+        ids = [option.id for option in self.options]
+        picker.highlighted = ids.index(self.selected) if self.selected in ids else 0
+        picker.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

@@ -6,7 +6,7 @@ from mcp.server.mcpserver import MCPServer
 
 from . import events, protocol, render
 from .models import Message
-from .store import ACTIVE, OFFLINE, WAITING, CoopStore
+from .store import ACTIVE, EVENT, OFFLINE, WAITING, CoopStore
 
 DEFAULT_WAIT_SECONDS = 45
 MAX_WAIT_SECONDS = 300
@@ -59,27 +59,27 @@ def register_team_tools(server: MCPServer, store: CoopStore, agent: str) -> None
 
 def register_message_tools(server: MCPServer, store: CoopStore, agent: str) -> None:
     @server.tool(structured_output=False)
-    def send_message(to: str, message: str) -> str:
-        """Send a message. `to` is a teammate's name, "all" for every agent plus the user, or "user" for the human operator. To ask the user something that needs a decision, use ask_user instead."""
+    def send_message(to: str, message: str, goal_id: Optional[int] = None) -> str:
+        """Send a message. `to` is a teammate's name, "all" for every agent plus the user, or "user" for the human operator. goal_id files it under that goal's conversation; leave it empty to use the goal you are working on. To ask the user something that needs a decision, use ask_user instead."""
         store.touch_agent(agent)
-        sent = store.send_message(agent, to, message)
+        sent = store.send_message(agent, to, message, goal_id=resolve_goal(store, agent, goal_id))
 
-        return f"Sent message #{sent.id} to {sent.recipient}."
+        return f"Sent message #{sent.id} to {sent.recipient}{goal_suffix(sent.goal_id)}."
 
     @server.tool(structured_output=False)
-    def ask_user(question: str) -> str:
-        """Ask the human operator a question that only they can decide. It is pinned in their dashboard until answered; the answer arrives later as a message from "user", so do not stop listening."""
+    def ask_user(question: str, goal_id: Optional[int] = None) -> str:
+        """Ask the human operator a question that only they can decide. It is pinned in their dashboard until answered; the answer arrives later as a message from "user", so do not stop listening. goal_id works as in send_message."""
         store.touch_agent(agent)
-        asked = store.ask_user(agent, question)
+        asked = store.ask_user(agent, question, goal_id=resolve_goal(store, agent, goal_id))
 
-        return f"Asked the user (question #{asked.id}). The answer will arrive as a message; keep working or call wait_for_messages."
+        return f"Asked the user (question #{asked.id}{goal_suffix(asked.goal_id)}). The answer will arrive as a message; keep working or call wait_for_messages."
 
     @server.tool(structured_output=False)
     def read_messages() -> str:
         """Return your unread messages immediately (without waiting) and mark them as read."""
         store.touch_agent(agent)
 
-        return render.messages(store.take_unread(agent), "No unread messages.")
+        return render.messages(receive(store, agent, store.take_unread(agent)), "No unread messages.")
 
     @server.tool(structured_output=False)
     async def wait_for_messages(timeout_seconds: int = DEFAULT_WAIT_SECONDS) -> str:
@@ -92,7 +92,7 @@ def register_message_tools(server: MCPServer, store: CoopStore, agent: str) -> N
         if not received:
             return "No new messages yet. Call wait_for_messages again to keep listening."
 
-        return render.messages(received)
+        return render.messages(receive(store, agent, received))
 
     @server.tool(structured_output=False)
     def message_history(limit: int = 30, involving: Optional[str] = None) -> str:
@@ -112,8 +112,9 @@ def register_goal_tools(server: MCPServer, store: CoopStore, agent: str) -> None
 
     @server.tool(structured_output=False)
     def get_goal(goal_id: int) -> str:
-        """Show one goal with its full description and all of its tasks."""
+        """Show one goal with its full description and all of its tasks. It becomes the goal your messages are filed under."""
         store.touch_agent(agent)
+        store.set_current_goal(agent, store.get_goal(goal_id).id)
 
         return render.goal_details(store.get_goal(goal_id), store.list_tasks(goal_id=goal_id))
 
@@ -124,7 +125,8 @@ def register_task_tools(server: MCPServer, store: CoopStore, agent: str) -> None
         """Create a task under a goal. Leave assignee empty to let anyone claim it, or name a teammate (or yourself) to assign it."""
         store.touch_agent(agent)
         task = store.create_task(goal_id, title, agent, description, assignee)
-        store.announce(agent, events.task_created(agent, task))
+        store.set_current_goal(agent, task.goal_id)
+        store.announce(agent, events.task_created(agent, task), task.goal_id)
 
         return render.task_details(task)
 
@@ -133,7 +135,8 @@ def register_task_tools(server: MCPServer, store: CoopStore, agent: str) -> None
         """Take ownership of an unassigned task and mark it in_progress. Fails if a teammate already owns it."""
         store.touch_agent(agent)
         task = store.claim_task(task_id, agent)
-        store.announce(agent, events.task_claimed(agent, task))
+        store.set_current_goal(agent, task.goal_id)
+        store.announce(agent, events.task_claimed(agent, task), task.goal_id)
 
         return render.task_details(task)
 
@@ -147,7 +150,8 @@ def register_task_tools(server: MCPServer, store: CoopStore, agent: str) -> None
         """Update a task. status is one of todo, in_progress, blocked, done. result is a short summary of the outcome or of what blocks you. assignee hands the task to a teammate."""
         store.touch_agent(agent)
         task = store.update_task(task_id, status, result, assignee)
-        store.announce(agent, events.task_updated(agent, task))
+        store.set_current_goal(agent, task.goal_id)
+        store.announce(agent, events.task_updated(agent, task), task.goal_id)
 
         return render.task_details(task)
 
@@ -165,6 +169,28 @@ def register_prompts(server: MCPServer) -> None:
         return protocol.JOIN_PROMPT
 
 
+def resolve_goal(store: CoopStore, agent: str, goal_id: Optional[int]) -> Optional[int]:
+    resolved = store.resolve_goal(agent, goal_id)
+
+    if goal_id is not None:
+        store.set_current_goal(agent, resolved)
+
+    return resolved
+
+
+def receive(store: CoopStore, agent: str, received: list[Message]) -> list[Message]:
+    conversation_goals = [message.goal_id for message in received if message.goal_id is not None and message.kind != EVENT]
+
+    if conversation_goals:
+        store.set_current_goal(agent, conversation_goals[-1])
+
+    return received
+
+
+def goal_suffix(goal_id: Optional[int]) -> str:
+    return f" under goal #{goal_id}" if goal_id is not None else " (no goal)"
+
+
 def agent_role(store: CoopStore, agent: str) -> str:
     return next((known.role for known in store.list_agents() if known.name == agent), "")
 
@@ -175,10 +201,20 @@ def briefing(store: CoopStore, agent: str) -> str:
         render.section("Team", render.agents(store.list_agents(), time.time())),
         render.section("Open goals", render.goals(store.list_goals())),
         render.section("Your open tasks", render.tasks(store.list_tasks(assignee=agent, include_done=False))),
+        current_goal_line(store, agent),
         f"Unread messages: {store.count_unread(agent)} (read them with read_messages or wait_for_messages).",
     ]
 
     return "\n\n".join(sections)
+
+
+def current_goal_line(store: CoopStore, agent: str) -> str:
+    goal_id = store.resolve_goal(agent)
+
+    if goal_id is None:
+        return "Current goal: none. Pass goal_id to send_message so the user sees it under the right goal."
+
+    return f"Current goal: #{goal_id}. Your messages are filed under it unless you pass another goal_id."
 
 
 async def wait_for_unread(store: CoopStore, agent: str, timeout_seconds: int) -> list[Message]:

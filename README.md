@@ -151,10 +151,11 @@ An agent whose task is removed or reassigned is told to stop working on it.
 ### Messages
 
 ```bash
-a2a-coop send codex "Please review claude's change before merging"
+a2a-coop send codex "Please review claude's change before merging" --goal 2
 a2a-coop send all "Stop after the current task"
 a2a-coop inbox                     # unread messages addressed to you (marks them read)
 a2a-coop log -n 50                 # recent history; --involving codex filters by participant
+a2a-coop log --goal 2              # one goal's conversation
 ```
 
 ### Maintenance
@@ -171,16 +172,21 @@ a2a-coop reset --yes               # wipe all agents, goals, tasks and messages
 
 - **team**: every agent with its live presence (green = listening, yellow = busy or starting, red = not seen for
   2+ minutes, grey = offline) and status. Enter on an agent starts it; the last row adds a new one.
-- **conversation**: color-coded markdown cards, newest at the bottom. Questions for you have a yellow heavy
-  border. Scroll with the mouse wheel or PageUp/PageDown. `-n 100` loads more history (default 50).
+- **conversation**: the chat of one goal. The dashboard opens on the latest open goal; switch with Enter in
+  the goals list or Ctrl+O (which also lists closed goals). Messages that belong to no goal are under
+  "general". Color-coded markdown cards, newest at the bottom; questions for you have a yellow heavy border.
+  Scroll with the mouse wheel or PageUp/PageDown. `-n 100` loads more history (default 50).
 - **questions for you**: open questions from the agents, with their own answer box.
-- **goals & tasks** sidebar (hidden on terminals narrower than 100 columns).
-- **message box**: Enter messages everyone; start with `@codex ...` to message one agent (`@` names
-  autocomplete, → accepts).
+- **goals**: open goals with task progress and a "● N new" badge for goals that got messages while you were
+  looking elsewhere, plus the description and tasks of the open goal (hidden on terminals narrower than 100
+  columns; Ctrl+O still works).
+- **message box**: Enter messages everyone about the open goal; start with `@codex ...` to message one agent
+  (`@` names autocomplete, → accepts).
 
 | Key | Action |
 | --- | --- |
-| Ctrl+G | new goal |
+| Ctrl+O | switch goal |
+| Ctrl+G | new goal (and open it) |
 | Ctrl+N | new agent |
 | Ctrl+T | focus the team list (Enter starts the selected agent) |
 | Ctrl+R | answer the selected question |
@@ -194,6 +200,11 @@ While the dashboard is open it marks your inbox as read, since you see everythin
 The dashboard needs a real terminal (Windows Terminal, the VS Code terminal, any Linux/macOS terminal).
 Git Bash's own mintty window is not one to Python, so `watch` falls back to `--stream` there; run Git
 Bash inside Windows Terminal instead.
+
+Each message belongs to a goal (or to none). Goal and task events belong to their goal, your messages to the goal
+you have open, and an agent's messages to the goal it passes as `goal_id`, otherwise the goal it is working on
+(its latest claimed/updated task, opened goal or received message), otherwise the only active goal. Agents still
+receive every message addressed to them; they see the goal as `[goal #N]`.
 
 Every goal, task and message change is broadcast to the agents, so a listening agent reacts immediately.
 
