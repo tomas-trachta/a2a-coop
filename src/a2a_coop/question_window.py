@@ -130,7 +130,11 @@ class QuestionsWindow(tk.Toplevel):
         self.buttons = (
             add_button(row, "Answer", self.answer, primary=True, side="right"),
             add_button(row, "Dismiss", self.dismiss, side="right", padx=(0, 6)),
+            add_button(row, "Insert code…", self.insert_code, side="right", padx=(0, 6)),
         )
+
+    def insert_code(self) -> None:
+        self.dashboard.open_code_dialog(self, self.answer_box)
 
     def configure_tags(self) -> None:
         palette = self.dashboard.palette

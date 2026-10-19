@@ -9,6 +9,7 @@ BULLET_ITEM = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 NUMBERED_ITEM = re.compile(r"^(\s*)(\d+[.)])\s+(.*)$")
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
 INLINE = re.compile(r"`([^`\n]+)`|\*\*([^*\n]+)\*\*")
+INLINE_CODE = re.compile(r"`([^`\n]+)`")
 
 
 class Span(NamedTuple):
@@ -102,10 +103,16 @@ def spans(text: str) -> tuple[Span, ...]:
             result.append(Span(text[position : match.start()]))
 
         code, strong = match.groups()
-        result.append(Span(code, "code") if code is not None else Span(strong, "strong"))
+        result.extend([Span(code, "code")] if code is not None else strong_spans(strong))
         position = match.end()
 
     if position < len(text):
         result.append(Span(text[position:]))
 
     return tuple(result)
+
+
+def strong_spans(text: str) -> list[Span]:
+    parts = INLINE_CODE.split(text)
+
+    return [Span(part, "code" if index % 2 else "strong") for index, part in enumerate(parts) if part]

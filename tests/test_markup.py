@@ -26,6 +26,12 @@ def test_inline_code_and_bold_become_spans():
     assert line.spans == (Span("Use "), Span("open_goal", "code"), Span(" "), Span("before", "strong"), Span(" loading"))
 
 
+def test_inline_code_inside_bold_loses_its_backticks():
+    (line,) = markup.parse("**`check:base-ui` failed:** see below")
+
+    assert line.spans == (Span("check:base-ui", "code"), Span(" failed:", "strong"), Span(" see below"))
+
+
 def test_fenced_code_keeps_its_text_and_language():
     lines = markup.parse("Look:\n```Python\ndef f():\n\n    return 1\n```\nDone")
 

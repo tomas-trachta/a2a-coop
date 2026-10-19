@@ -1,10 +1,12 @@
 import tkinter as tk
+from types import SimpleNamespace
 
 import pytest
 
 from a2a_coop import events, preferences, theme
 from a2a_coop.gui import EVERYONE_LABEL, CoopDashboard
 from a2a_coop.store import EVERYONE, USER
+from a2a_coop.widgets import select_all
 
 
 @pytest.fixture
@@ -922,6 +924,58 @@ def test_chat_formats_lists_inline_code_and_highlighted_snippets(team, open_dash
     assert "syntax:function" in tags_at(dashboard.conversation, "swing()")
 
 
+def test_ctrl_a_selects_everything_in_the_message_box(team, open_dashboard):
+    dashboard = open_dashboard(team)
+    dashboard.composer.insert("1.0", "first line\nsecond line")
+    dashboard.composer.mark_set("insert", "2.3")
+
+    result = select_all(SimpleNamespace(widget=dashboard.composer))
+
+    assert {"<Control-Key-a>", "<Control-Key-A>"} <= set(dashboard.root.bind_class("Text"))
+    assert result == "break"
+    assert dashboard.composer.get("sel.first", "sel.last") == "first line\nsecond line"
+
+
+def test_code_snippets_are_inserted_as_fenced_blocks(team, open_dashboard):
+    dashboard = open_dashboard(team)
+    dashboard.composer.insert("1.0", "Try this:")
+
+    dialog = dashboard.open_code_dialog(dashboard.root, dashboard.composer)
+    dialog.language.set("Python")
+    dialog.code.insert("1.0", "print('hi')\n")
+    dialog.submit()
+    dashboard.composer.insert("end", "Thanks")
+    again = dashboard.open_code_dialog(dashboard.root, dashboard.composer)
+
+    assert draft(dashboard) == "Try this:\n```python\nprint('hi')\n```\nThanks"
+    assert again.language.get() == "Python"
+
+
+def test_selected_text_becomes_the_snippet_and_is_replaced(team, open_dashboard):
+    dashboard = open_dashboard(team)
+    dashboard.composer.insert("1.0", "Before\nSELECT 1;")
+    dashboard.composer.tag_add("sel", "2.0", "end-1c")
+    dashboard.composer.mark_set("insert", "end-1c")
+
+    dialog = dashboard.open_code_dialog(dashboard.root, dashboard.composer)
+    code = dialog.code.get("1.0", "end-1c")
+    dialog.language.set("SQL")
+    dialog.submit()
+
+    assert code == "SELECT 1;"
+    assert draft(dashboard) == "Before\n```sql\nSELECT 1;\n```\n"
+
+
+def test_an_empty_snippet_is_refused(team, open_dashboard):
+    dashboard = open_dashboard(team)
+    dialog = dashboard.open_code_dialog(dashboard.root, dashboard.composer)
+
+    dialog.submit()
+
+    assert dialog.error.cget("text") == "Paste or type some code first."
+    assert draft(dashboard) == ""
+
+
 def test_questions_open_in_their_own_window_with_the_draft(team, open_dashboard):
     question = team.ask_user("claude", "Which database?\n- SQLite\n- Postgres")
     dashboard = open_dashboard(team)
@@ -1024,3 +1078,19 @@ def test_a_new_project_starts_empty_and_is_selected(team, open_dashboard, tmp_pa
     assert list(dashboard.project_choice.cget("values")) == ["Default", "Blog"]
     assert dashboard.team.get_children() == ("claude",)
     assert dashboard.goal_id is None and "No goals yet" in conversation(dashboard)
+
+
+def test_selection_shows_over_highlighted_rows(team, open_dashboard):
+    goal = team.create_goal("Grappling hook")
+    team.ask_user("codex", "Which port?", goal_id=goal.id)
+    team.send_message("claude", EVERYONE, "```python\ndef f():\n    return 1\n```", goal_id=goal.id)
+    dashboard = open_dashboard(team)
+    text = dashboard.conversation
+
+    text.tag_add("sel", "1.0", "end-1c")
+    dashboard.root.update()
+
+    priority = text.tag_names()
+
+    assert priority[-1] == "sel"
+    assert {"question", "body-code-block"} <= set(priority)

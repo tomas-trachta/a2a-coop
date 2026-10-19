@@ -5,10 +5,12 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any, Callable, Optional
 
-from . import providers, theme
+from . import providers, reading, theme
 from .errors import CoopError
 
 FIELD_WIDTH = 60
+CODE_WIDTH = 88
+CODE_LINES = 16
 DIALOG_PADDING = 20
 
 
@@ -22,6 +24,12 @@ class GoalDraft:
 class ProjectDraft:
     name: str
     folder: str
+
+
+@dataclass(frozen=True)
+class CodeDraft:
+    language: str
+    code: str
 
 
 @dataclass(frozen=True)
@@ -152,6 +160,41 @@ class GoalDialog(Dialog):
         return GoalDraft(title, self.description.get("1.0", "end").strip())
 
 
+class CodeDialog(Dialog):
+    def __init__(self, parent: tk.Misc, accept: Callable[[CodeDraft], None], language: str, code: str):
+        super().__init__(parent, "Insert code", accept)
+
+        self.add_label("Language", first=True)
+        self.language = ttk.Combobox(self.body, values=list(reading.CODE_LANGUAGES), state="readonly")
+        self.language.set(language_label(language))
+        self.language.pack(anchor="w")
+
+        self.add_label("Code")
+        self.add_hint("Ctrl+Enter inserts it into your message. Plain text is shown without highlighting.")
+        self.code = self.add_code_box(code)
+        self.add_buttons("Insert")
+
+        self.bind("<Control-Return>", lambda event: self.submit() or "break")
+        self.show(self.code)
+
+    def add_code_box(self, code: str) -> tk.Text:
+        options = {**theme.field_text_options(theme.current(self)), "font": theme.CODE_FONT}
+        box = tk.Text(self.body, width=CODE_WIDTH, height=CODE_LINES, wrap="none", undo=True, **options)
+        box.pack(fill="both", expand=True)
+        box.insert("1.0", code)
+
+        return box
+
+    def draft(self) -> Optional[CodeDraft]:
+        code = self.code.get("1.0", "end-1c")
+
+        if not code.strip():
+            self.show_error("Paste or type some code first.")
+            return None
+
+        return CodeDraft(reading.CODE_LANGUAGES[self.language.get()], code.strip("\n"))
+
+
 class AgentDialog(Dialog):
     def __init__(self, parent: tk.Misc, accept: Callable[[AgentDraft], None], taken_names: set[str], default_dir: Path):
         super().__init__(parent, "New agent", accept)
@@ -252,6 +295,10 @@ def add_folder_choice(dialog: Dialog, variable: tk.StringVar) -> None:
 
     ttk.Entry(row, textvariable=variable).pack(side="left", fill="x", expand=True)
     ttk.Button(row, text="Browse…", command=browse).pack(side="left", padx=(6, 0))
+
+
+def language_label(language: str) -> str:
+    return next((label for label, name in reading.CODE_LANGUAGES.items() if name == language), reading.PLAIN_TEXT)
 
 
 def provider_labels() -> list[str]:

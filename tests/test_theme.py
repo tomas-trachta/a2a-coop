@@ -23,6 +23,8 @@ def readable_pairs(palette: theme.Palette) -> dict[str, tuple[str, str]]:
         "selected tab": (palette.primary, palette.surface),
         "user": (palette.user, palette.surface),
         "everyone": (palette.everyone, palette.surface),
+        "inline code": (palette.inline_code, palette.surface),
+        "inline code in a question": (palette.inline_code, palette.question_background),
     }
 
 

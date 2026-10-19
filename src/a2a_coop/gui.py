@@ -8,8 +8,8 @@ from tkinter import font, messagebox, ttk
 from typing import Callable, Optional
 
 from . import events as coop_events
-from . import launch, preferences, projects, providers, reading, render, theme
-from .dialogs import AgentDialog, AgentDraft, GoalDialog, GoalDraft, ProjectDialog, ProjectDraft
+from . import launch, markup, preferences, projects, providers, reading, render, theme
+from .dialogs import AgentDialog, AgentDraft, CodeDialog, CodeDraft, GoalDialog, GoalDraft, ProjectDialog, ProjectDraft
 from .errors import CoopError
 from .models import Agent, Goal, Message, Task
 from .question_window import QuestionsWindow
@@ -22,6 +22,7 @@ from .widgets import (
     TextPanel,
     add_button,
     append_text,
+    bind_select_all,
     button_row,
     card,
     clear_text,
@@ -31,6 +32,7 @@ from .widgets import (
     field_text,
     focus_next,
     focus_previous,
+    insert_block,
     is_scrolled_to_end,
     recolor_widgets,
     replace_selection,
@@ -40,6 +42,7 @@ from .widgets import (
     select_first,
     select_only,
     selected_iid,
+    selected_text,
     set_enabled,
     surface,
     swatch_image,
@@ -166,6 +169,7 @@ class CoopDashboard:
 
         self.answering: Optional[int] = None
         self.question_window: Optional[QuestionsWindow] = None
+        self.code_language = ""
         self.full_title = ""
         self.showing_hint = False
         self.jobs: dict[str, str] = {}
@@ -444,6 +448,7 @@ class CoopDashboard:
         self.recipient.pack(side="left")
 
         add_button(row, "Send", self.send_message, primary=True, side="right", padx=0)
+        add_button(row, "Insert code…", self.insert_code_in_composer, side="right", padx=(0, 6))
 
     def build_questions(self, parent: tk.Misc) -> ttk.Frame:
         self.questions_card = card(parent)
@@ -549,6 +554,7 @@ class CoopDashboard:
         self.goal_buttons["cancelled"].pack_configure(side="right", padx=0)
 
     def bind_keys(self) -> None:
+        bind_select_all(self.root)
         bind_shortcut(self.root, "p", self.new_project)
         bind_shortcut(self.root, "g", self.new_goal)
         bind_shortcut(self.root, "n", self.new_agent)
@@ -979,6 +985,17 @@ class CoopDashboard:
         self.composer.delete("1.0", "end")
         self.composer.edit_reset()
         self.fit_composer()
+
+    def insert_code_in_composer(self) -> CodeDialog:
+        return self.open_code_dialog(self.root, self.composer)
+
+    def open_code_dialog(self, parent: tk.Misc, target: tk.Text) -> CodeDialog:
+        return CodeDialog(parent, lambda draft: self.insert_code(target, draft), self.code_language, selected_text(target))
+
+    def insert_code(self, target: tk.Text, draft: CodeDraft) -> None:
+        self.code_language = draft.language
+        insert_block(target, markup.fence(draft.code, draft.language))
+        target.focus_set()
 
     def insert_new_line(self) -> str:
         replace_selection(self.composer, "\n")

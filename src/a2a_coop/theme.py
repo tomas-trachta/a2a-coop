@@ -53,6 +53,7 @@ class Palette:
     user: str
     everyone: str
     code_background: str
+    inline_code: str
     syntax: dict[str, str]
     identities: tuple[str, ...]
     derived_lightness: float
@@ -83,6 +84,7 @@ LIGHT = Palette(
     user="#1E7B45",
     everyone="#344054",
     code_background="#EEF2F7",
+    inline_code="#9A3412",
     syntax={
         "keyword": "#CF222E",
         "string": "#0A3069",
@@ -133,6 +135,7 @@ DARK = Palette(
     user="#86D6A0",
     everyone="#CBD5E1",
     code_background="#0B1220",
+    inline_code="#F9B98C",
     syntax={
         "keyword": "#FF7B72",
         "string": "#A5D6FF",

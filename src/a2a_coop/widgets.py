@@ -179,6 +179,7 @@ def scrolled_text(
 
     text.pack(side="left", fill="both", expand=True)
     text.bind("<1>", lambda event: text.focus_set(), add="+")
+    text.bind("<<Selection>>", lambda event: text.tag_raise("sel"), add="+")
 
     return frame, text
 
@@ -351,6 +352,36 @@ def replace_selection(text: tk.Text, content: str) -> None:
         text.delete("sel.first", "sel.last")
 
     text.insert("insert", content)
+
+
+def insert_block(text: tk.Text, block: str) -> None:
+    if text.tag_ranges("sel"):
+        replace_selection(text, "")
+
+    lead = "" if text.compare("insert", "==", "insert linestart") else "\n"
+    text.insert("insert", f"{lead}{block}\n")
+    text.see("insert")
+
+
+def selected_text(text: tk.Text) -> str:
+    return text.get("sel.first", "sel.last") if text.tag_ranges("sel") else ""
+
+
+def bind_select_all(root: tk.Misc) -> None:
+    for widget_class in ("Text", "TEntry"):
+        for variant in ("a", "A"):
+            root.bind_class(widget_class, f"<Control-{variant}>", select_all)
+
+
+def select_all(event: tk.Event) -> str:
+    widget = event.widget
+
+    if isinstance(widget, tk.Text):
+        widget.tag_add("sel", "1.0", "end-1c")
+    else:
+        widget.event_generate("<<SelectAll>>")
+
+    return "break"
 
 
 def focus_next(widget: tk.Misc) -> str:
