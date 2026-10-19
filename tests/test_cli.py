@@ -61,3 +61,21 @@ def test_no_command_opens_the_dashboard():
     from a2a_coop.cli import build_parser, watch_messages
 
     assert build_parser().parse_args([]).handler is watch_messages
+
+
+def test_projects_keep_their_own_team_and_goals(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("a2a_coop.launch.ensure_default_agents", lambda store: [])
+    db = tmp_path / "coop.db"
+    run(db, "project", "add", "Web shop", "--dir", str(tmp_path))
+    run(db, "--project", "web shop", "agent", "add", "--provider", "codex", "--role", "shop dev")
+    run(db, "--project", "Web shop", "goal", "add", "Checkout")
+    run(db, "project", "list")
+
+    shop = CoopStore(tmp_path / "projects" / "web-shop" / "coop.db")
+    output = capsys.readouterr().out
+
+    assert [agent.name for agent in shop.list_agents()] == ["codex-shop-dev"]
+    assert [goal.title for goal in shop.list_goals()] == ["Checkout"]
+    assert CoopStore(db).list_agents() == [] and CoopStore(db).list_goals() == []
+    assert f"Web shop  ({tmp_path}): codex-shop-dev" in output
+    assert "Default: no agents yet" in output

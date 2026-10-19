@@ -123,3 +123,15 @@ async def team_receives(team, client, goal_id: int) -> str:
     team.send_message("user", "claude", "status?", goal_id=goal_id)
 
     return text_of(await client.call_tool("read_messages", {}))
+
+
+async def test_code_snippets_are_attached_as_fenced_blocks(team):
+    snippet = "def answer():\n    return 42"
+
+    async with Client(build_server(team, "claude")) as claude:
+        await claude.call_tool("send_message", {"to": "codex", "message": "Try this:", "code": snippet, "language": "python"})
+        await claude.call_tool("ask_user", {"question": "Run it?", "code": "make test", "language": "bash"})
+
+    sent = [message.body for message in team.recent_messages() if message.sender == "claude"]
+
+    assert sent == [f"Try this:\n\n```python\n{snippet}\n```", "Run it?\n\n```bash\nmake test\n```"]

@@ -5,13 +5,20 @@ from tkinter import font, ttk
 
 BODY_FONT = "TkDefaultFont"
 TEXT_FONT = "TkTextFont"
+FIXED_FONT = "TkFixedFont"
 BOLD_FONT = "CoopBold"
 GOAL_TITLE_FONT = "CoopGoalTitle"
 TITLE_FONT = "CoopTitle"
+READING_FONT = "CoopReading"
+READING_BOLD_FONT = "CoopReadingBold"
+READING_HEADING_FONT = "CoopReadingHeading"
+CODE_FONT = "CoopCode"
 
 MIN_BODY_POINTS = 10
 GOAL_TITLE_SCALE = 1.3
 TITLE_SCALE = 1.7
+READING_SCALE = 1.1
+READING_HEADING_SCALE = 1.2
 REFERENCE_DPI = 96
 PANE_GAP = 12
 
@@ -45,6 +52,8 @@ class Palette:
     error: str
     user: str
     everyone: str
+    code_background: str
+    syntax: dict[str, str]
     identities: tuple[str, ...]
     derived_lightness: float
 
@@ -73,6 +82,15 @@ LIGHT = Palette(
     error="#B42318",
     user="#1E7B45",
     everyone="#344054",
+    code_background="#EEF2F7",
+    syntax={
+        "keyword": "#CF222E",
+        "string": "#0A3069",
+        "comment": "#57606A",
+        "number": "#0550AE",
+        "function": "#6639BA",
+        "builtin": "#953800",
+    },
     identities=(
         "#1D4ED8",
         "#C2410C",
@@ -114,6 +132,15 @@ DARK = Palette(
     error="#FDA4AF",
     user="#86D6A0",
     everyone="#CBD5E1",
+    code_background="#0B1220",
+    syntax={
+        "keyword": "#FF7B72",
+        "string": "#A5D6FF",
+        "comment": "#8B949E",
+        "number": "#79C0FF",
+        "function": "#D2A8FF",
+        "builtin": "#FFA657",
+    },
     identities=(
         "#93B4FF",
         "#FDBA74",
@@ -191,6 +218,15 @@ def configure_fonts(root: tk.Tk) -> None:
     define_font(root, GOAL_TITLE_FONT, body, weight="bold", scale=GOAL_TITLE_SCALE)
     define_font(root, TITLE_FONT, body, weight="bold", scale=TITLE_SCALE)
 
+    text = font.nametofont(TEXT_FONT, root=root)
+    reading_size = round(text.cget("size") * READING_SCALE)
+
+    define_font(root, READING_FONT, text, weight="normal", scale=READING_SCALE)
+    define_font(root, READING_BOLD_FONT, text, weight="bold", scale=READING_SCALE)
+    define_font(root, READING_HEADING_FONT, text, weight="bold", scale=READING_HEADING_SCALE)
+    code_size = reading_size - 1 if reading_size > 0 else reading_size + 1
+    define_font(root, CODE_FONT, font.nametofont(FIXED_FONT, root=root), weight="normal", size=code_size)
+
 
 def enlarge_font(named: font.Font) -> None:
     size = named.cget("size")
@@ -199,8 +235,8 @@ def enlarge_font(named: font.Font) -> None:
         named.configure(size=MIN_BODY_POINTS)
 
 
-def define_font(root: tk.Tk, name: str, base: font.Font, weight: str, scale: float = 1.0) -> None:
-    options = ("-family", base.cget("family"), "-size", round(base.cget("size") * scale), "-weight", weight)
+def define_font(root: tk.Tk, name: str, base: font.Font, weight: str, scale: float = 1.0, size: int = 0) -> None:
+    options = ("-family", base.cget("family"), "-size", size or round(base.cget("size") * scale), "-weight", weight)
 
     if name in font.names(root):
         root.tk.call("font", "configure", name, *options)

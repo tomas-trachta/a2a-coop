@@ -38,6 +38,13 @@ def test_text_and_status_colors_are_readable(palette):
 
 
 @PALETTES
+def test_code_colors_are_readable_on_code_blocks(palette):
+    colors = {"text": palette.text, **palette.syntax}
+
+    assert min(theme.contrast(color, palette.code_background) for color in colors.values()) >= READABLE
+
+
+@PALETTES
 def test_agent_identities_are_readable_on_cards(palette):
     colors = [theme.identity_color(palette, index) for index in range(24)]
 

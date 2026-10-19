@@ -242,9 +242,9 @@ def recolor_widget(widget: tk.Misc, palette: theme.Palette) -> None:
 
 
 def recolor_text(text: tk.Text, palette: theme.Palette) -> None:
-    editable = str(text.cget("state")) == "normal"
+    is_field = int(text.cget("highlightthickness")) > 0
 
-    text.configure(**(theme.field_text_options(palette) if editable else theme.text_options(palette)))
+    text.configure(**(theme.field_text_options(palette) if is_field else theme.text_options(palette)))
 
 
 def recolor_popdown(combobox: ttk.Combobox, palette: theme.Palette) -> None:
@@ -257,6 +257,12 @@ def recolor_popdown(combobox: ttk.Combobox, palette: theme.Palette) -> None:
 
 def set_enabled(widget: ttk.Widget, enabled: bool) -> None:
     widget.state(["!disabled"] if enabled else ["disabled"])
+
+
+def set_field_enabled(text: tk.Text, enabled: bool) -> None:
+    palette = theme.current(text)
+
+    text.configure(state="normal" if enabled else "disabled", background=palette.surface if enabled else palette.background)
 
 
 def selected_iid(tree: ttk.Treeview) -> Optional[str]:
@@ -338,3 +344,22 @@ def longest_fitting_prefix(text: str, fits: Callable[[str], bool]) -> int:
             high = middle - 1
 
     return low
+
+
+def replace_selection(text: tk.Text, content: str) -> None:
+    if text.tag_ranges("sel") and text.compare("sel.first", "<=", "insert") and text.compare("sel.last", ">=", "insert"):
+        text.delete("sel.first", "sel.last")
+
+    text.insert("insert", content)
+
+
+def focus_next(widget: tk.Misc) -> str:
+    widget.tk_focusNext().focus_set()
+
+    return "break"
+
+
+def focus_previous(widget: tk.Misc) -> str:
+    widget.tk_focusPrev().focus_set()
+
+    return "break"

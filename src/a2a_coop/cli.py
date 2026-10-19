@@ -7,7 +7,7 @@ from typing import Optional
 
 from rich.console import Console
 
-from . import connect, events, launch, pretty, providers, render, server
+from . import connect, events, launch, preferences, pretty, projects, providers, render, server
 from .errors import CoopError
 from .models import Message
 from .paths import DB_ENV_VAR, default_db_path
@@ -31,9 +31,20 @@ def main(argv: Optional[list[str]] = None) -> None:
         configure_console()
 
     try:
+        choose_coop(args)
         args.handler(CoopStore(args.db), args)
     except CoopError as error:
         exit_with_error(error, getattr(args, "hold", False))
+
+
+def choose_coop(args: argparse.Namespace) -> None:
+    args.home = (args.db or default_db_path()).parent
+    args.chosen = args.db is not None or args.project is not None
+
+    if args.project:
+        args.db = projects.get_project(args.home, args.project).db
+    elif args.db is None:
+        args.db = default_db_path()
 
 
 def exit_with_error(error: CoopError, hold: bool) -> None:
@@ -63,14 +74,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db",
         type=expanded_path,
-        default=default_db_path(),
-        help=f"shared coop database (default: %(default)s, overridable with ${DB_ENV_VAR})",
+        help=f"shared coop database (default: {default_db_path()}, overridable with ${DB_ENV_VAR})",
     )
+    parser.add_argument("--project", "-P", help="work in this project instead (see `a2a-coop project list`)")
     parser.set_defaults(handler=watch_messages, backlog=50, stream=False, command=None)
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     add_serve_command(commands)
     add_overview_commands(commands)
+    add_project_commands(commands)
     add_agent_commands(commands)
     add_goal_commands(commands)
     add_task_commands(commands)
@@ -93,6 +105,20 @@ def add_overview_commands(commands: argparse._SubParsersAction) -> None:
 
     agents = commands.add_parser("agents", help="list agents (same as `agent list`)")
     agents.set_defaults(handler=show_agents)
+
+
+def add_project_commands(commands: argparse._SubParsersAction) -> None:
+    project = commands.add_parser("project", help="create and list projects, each with its own team and goals").add_subparsers(
+        dest="project_command", metavar="ACTION", required=True
+    )
+
+    add = project.add_parser("add", help="create a project with its own team, goals and conversation")
+    add.add_argument("name")
+    add.add_argument("--dir", dest="folder", default="", help="folder its agents start in by default")
+    add.set_defaults(handler=add_project)
+
+    listing = project.add_parser("list", help="list projects")
+    listing.set_defaults(handler=list_projects)
 
 
 def add_agent_commands(commands: argparse._SubParsersAction) -> None:
@@ -274,6 +300,22 @@ def open_goals_overview(store: CoopStore) -> str:
     return "\n".join(render.goal_details(goal, store.list_tasks(goal_id=goal.id)) for goal in goals)
 
 
+def add_project(store: CoopStore, args: argparse.Namespace) -> None:
+    project = projects.add_project(args.home, args.name, providers.normalize_workdir(args.folder))
+    added = launch.ensure_default_agents(CoopStore(project.db))
+
+    print(f"Created project {project.name}" + (f" with agents {', '.join(agent.name for agent in added)}." if added else "."))
+    print(f"Open it with `{PROGRAM} --project {connect.shell_join([project.name])}` or pick it in the dashboard.")
+
+
+def list_projects(store: CoopStore, args: argparse.Namespace) -> None:
+    for project in projects.list_projects(args.home):
+        team = ", ".join(agent.name for agent in CoopStore(project.db).list_agents()) if project.db.exists() else ""
+        folder = f"  ({project.folder})" if project.folder else ""
+
+        print(f"{project.name}{folder}: {team or 'no agents yet'}")
+
+
 def show_agents(store: CoopStore, args: argparse.Namespace) -> None:
     print(render.agents(store.list_agents(), time.time()))
 
@@ -431,22 +473,33 @@ def watch_messages(store: CoopStore, args: argparse.Namespace) -> None:
         stream_messages(store, args.backlog)
         return
 
+    store = last_project_store(args) or store
     launch.ensure_default_agents(store)
 
     try:
-        open_dashboard(store, args.backlog)
+        open_dashboard(store, args.backlog, args.home)
     except CoopError as error:
         print(f"{error} Following messages here instead.", file=sys.stderr)
         stream_messages(store, args.backlog)
 
 
-def open_dashboard(store: CoopStore, backlog: int) -> None:
+def last_project_store(args: argparse.Namespace) -> Optional[CoopStore]:
+    if args.chosen:
+        return None
+
+    name = preferences.load_project(preferences.preferences_path(args.home / projects.DB_FILE))
+    project = projects.find_project(args.home, name) if name else None
+
+    return CoopStore(project.db) if project is not None else None
+
+
+def open_dashboard(store: CoopStore, backlog: int, home: Path) -> None:
     try:
         from . import gui
     except ImportError as error:
         raise CoopError(f"The dashboard needs tkinter ({error}).") from error
 
-    gui.watch(store, backlog)
+    gui.watch(store, backlog, home)
 
 
 def stream_messages(store: CoopStore, backlog: int) -> None:

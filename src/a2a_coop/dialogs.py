@@ -19,6 +19,12 @@ class GoalDraft:
 
 
 @dataclass(frozen=True)
+class ProjectDraft:
+    name: str
+    folder: str
+
+
+@dataclass(frozen=True)
 class AgentDraft:
     name: str
     provider: str
@@ -183,22 +189,11 @@ class AgentDialog(Dialog):
 
     def add_workdir_choice(self) -> None:
         self.add_label("Working directory")
-
-        row = ttk.Frame(self.body)
-        row.pack(fill="x")
-
-        ttk.Entry(row, textvariable=self.workdir).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Browse…", command=self.browse_workdir).pack(side="left", padx=(6, 0))
+        add_folder_choice(self, self.workdir)
 
     def add_start_choice(self) -> None:
         check = ttk.Checkbutton(self.body, text="Start it now in a new terminal", variable=self.start)
         check.pack(anchor="w", pady=(12, 0))
-
-    def browse_workdir(self) -> None:
-        chosen = filedialog.askdirectory(parent=self, initialdir=self.workdir.get(), mustexist=True)
-
-        if chosen:
-            self.workdir.set(chosen)
 
     def selected_provider(self) -> str:
         return self.provider_names[self.provider.current()]
@@ -217,6 +212,46 @@ class AgentDialog(Dialog):
             workdir=self.workdir.get().strip(),
             start=self.start.get(),
         )
+
+
+class ProjectDialog(Dialog):
+    def __init__(self, parent: tk.Misc, accept: Callable[[ProjectDraft], None], default_dir: Path):
+        super().__init__(parent, "New project", accept)
+        self.project_name = tk.StringVar(self)
+        self.folder = tk.StringVar(self, value=str(default_dir))
+
+        name_entry = self.add_entry("Name", self.project_name, first=True)
+        self.add_label("Folder")
+        self.add_hint("Agents of this project start here unless they have their own working directory.")
+        add_folder_choice(self, self.folder)
+        self.add_hint("The project gets its own team, goals and conversation.", above=False)
+        self.add_buttons("Create project")
+
+        self.bind("<Return>", lambda event: self.submit())
+        self.show(name_entry)
+
+    def draft(self) -> Optional[ProjectDraft]:
+        name = self.project_name.get().strip()
+
+        if not name:
+            self.show_error("Give the project a name.")
+            return None
+
+        return ProjectDraft(name, self.folder.get().strip())
+
+
+def add_folder_choice(dialog: Dialog, variable: tk.StringVar) -> None:
+    def browse() -> None:
+        chosen = filedialog.askdirectory(parent=dialog, initialdir=variable.get(), mustexist=True)
+
+        if chosen:
+            variable.set(chosen)
+
+    row = ttk.Frame(dialog.body)
+    row.pack(fill="x")
+
+    ttk.Entry(row, textvariable=variable).pack(side="left", fill="x", expand=True)
+    ttk.Button(row, text="Browse…", command=browse).pack(side="left", padx=(6, 0))
 
 
 def provider_labels() -> list[str]:

@@ -4,7 +4,7 @@ from typing import Optional
 import anyio
 from mcp.server.mcpserver import MCPServer
 
-from . import events, protocol, render
+from . import events, markup, protocol, render
 from .models import Message
 from .store import ACTIVE, EVENT, OFFLINE, WAITING, CoopStore
 
@@ -59,18 +59,19 @@ def register_team_tools(server: MCPServer, store: CoopStore, agent: str) -> None
 
 def register_message_tools(server: MCPServer, store: CoopStore, agent: str) -> None:
     @server.tool(structured_output=False)
-    def send_message(to: str, message: str, goal_id: Optional[int] = None) -> str:
-        """Send a message. `to` is a teammate's name, "all" for every agent plus the user, or "user" for the human operator. goal_id files it under that goal's conversation; leave it empty to use the goal you are working on. To ask the user something that needs a decision, use ask_user instead."""
+    def send_message(to: str, message: str, goal_id: Optional[int] = None, code: str = "", language: str = "") -> str:
+        """Send a message. `to` is a teammate's name, "all" for every agent plus the user, or "user" for the human operator. goal_id files it under that goal's conversation; leave it empty to use the goal you are working on. To share a code snippet, put it in `code` (and its language, e.g. "python" or "kotlin", in `language`): it is attached below the message and syntax-highlighted in the user's dashboard. To ask the user something that needs a decision, use ask_user instead."""
         store.touch_agent(agent)
-        sent = store.send_message(agent, to, message, goal_id=resolve_goal(store, agent, goal_id))
+        body = with_snippet(message, code, language)
+        sent = store.send_message(agent, to, body, goal_id=resolve_goal(store, agent, goal_id))
 
         return f"Sent message #{sent.id} to {sent.recipient}{goal_suffix(sent.goal_id)}."
 
     @server.tool(structured_output=False)
-    def ask_user(question: str, goal_id: Optional[int] = None) -> str:
-        """Ask the human operator a question that only they can decide. It is pinned in their dashboard until answered; the answer arrives later as a message from "user", so do not stop listening. goal_id works as in send_message."""
+    def ask_user(question: str, goal_id: Optional[int] = None, code: str = "", language: str = "") -> str:
+        """Ask the human operator a question that only they can decide. It is pinned in their dashboard until answered; the answer arrives later as a message from "user", so do not stop listening. goal_id, code and language work as in send_message."""
         store.touch_agent(agent)
-        asked = store.ask_user(agent, question, goal_id=resolve_goal(store, agent, goal_id))
+        asked = store.ask_user(agent, with_snippet(question, code, language), goal_id=resolve_goal(store, agent, goal_id))
 
         return f"Asked the user (question #{asked.id}{goal_suffix(asked.goal_id)}). The answer will arrive as a message; keep working or call wait_for_messages."
 
@@ -167,6 +168,13 @@ def register_prompts(server: MCPServer) -> None:
     @server.prompt(name="join", description="Join the coop and start cooperating on the active goals.")
     def join() -> str:
         return protocol.JOIN_PROMPT
+
+
+def with_snippet(text: str, code: str, language: str) -> str:
+    if not code.strip():
+        return text
+
+    return f"{text.rstrip()}\n\n{markup.fence(code, language)}"
 
 
 def resolve_goal(store: CoopStore, agent: str, goal_id: Optional[int]) -> Optional[int]:

@@ -903,3 +903,124 @@ def test_open_and_new_dialogs_follow_the_appearance(team, open_dashboard):
     assert dialog.error.cget("text") == "Give the goal a title."
     assert background(agent_dialog) == theme.DARK.background
     assert popdown_background(agent_dialog.provider) == theme.DARK.surface
+
+
+def tags_at(text, needle: str) -> tuple[str, ...]:
+    return text.tag_names(text.search(needle, "1.0"))
+
+
+def test_chat_formats_lists_inline_code_and_highlighted_snippets(team, open_dashboard):
+    goal = team.create_goal("Grappling hook")
+    body = "Plan:\n- swing the `hook`\n\n```python\ndef swing():\n    return 1\n```"
+    team.send_message("claude", EVERYONE, body, goal_id=goal.id)
+    dashboard = open_dashboard(team)
+    text = conversation(dashboard)
+
+    assert "•\tswing the hook" in text and "`" not in text
+    assert "body-code" in tags_at(dashboard.conversation, "hook\n")
+    assert "syntax:keyword" in tags_at(dashboard.conversation, "def swing")
+    assert "syntax:function" in tags_at(dashboard.conversation, "swing()")
+
+
+def test_questions_open_in_their_own_window_with_the_draft(team, open_dashboard):
+    question = team.ask_user("claude", "Which database?\n- SQLite\n- Postgres")
+    dashboard = open_dashboard(team)
+    dashboard.answer_box.insert(0, "SQLite, for now")
+
+    dashboard.open_question_window()
+    dashboard.root.update()
+    window = dashboard.question_window
+
+    assert dashboard.answer_area.winfo_manager() == "" and dashboard.questions_popped_out.winfo_manager() == "pack"
+    assert window.answer_box.get("1.0", "end-1c") == "SQLite, for now"
+    assert "•\tPostgres" in window.reader.content()
+
+    window.answer_box.insert("end", "\nmaybe Postgres later")
+    window.answer()
+
+    assert team.open_questions() == []
+    assert answers_to(team, "claude")[-1].endswith("SQLite, for now\nmaybe Postgres later")
+    assert window.answer_box.get("1.0", "end-1c") == "" and window.answer_box.cget("state") == "disabled"
+    assert question.id not in dashboard.answer_drafts
+
+
+def test_closing_the_questions_window_hands_back_selection_and_draft(team, open_dashboard):
+    first = team.ask_user("claude", "Which database?")
+    second = team.ask_user("codex", "Which port?")
+    dashboard = open_dashboard(team)
+
+    dashboard.open_question_window()
+    window = dashboard.question_window
+    select(dashboard, window.question_list, str(second.id))
+    window.answer_box.insert("1.0", "8080")
+    team.ask_user("claude", "Ship it?")
+    dashboard.refresh_dashboard()
+    listed = len(window.question_list.get_children())
+    kept = (window.selected(), window.answer_box.get("1.0", "end-1c"))
+    window.close()
+    dashboard.root.update()
+
+    assert listed == 3 and kept == (second.id, "8080")
+    assert dashboard.question_window is None
+    assert dashboard.selected_question() == second.id
+    assert dashboard.answer_box.get() == "8080"
+    assert dashboard.answer_area.winfo_manager() == "pack"
+    assert [question.id for question in team.open_questions()][:2] == [first.id, second.id]
+
+
+def test_questions_window_follows_the_appearance(team, open_dashboard):
+    team.ask_user("claude", "Which database?")
+    dashboard = open_dashboard(team)
+    dashboard.open_question_window()
+
+    choose(dashboard, "Dark")
+
+    assert background(dashboard.question_window.reader.text) == theme.DARK.surface
+    assert background(dashboard.question_window) == theme.DARK.background
+
+
+def test_picking_a_project_shows_its_own_team_goals_and_questions(team, open_dashboard, tmp_path):
+    from a2a_coop import projects
+    from a2a_coop.store import CoopStore
+
+    team.create_goal("Grappling hook")
+    shop = projects.add_project(tmp_path, "Web shop", folder=str(tmp_path))
+    shop_store = CoopStore(shop.db)
+    shop_store.define_agent("shop-dev", "codex", "shop developer", "")
+    checkout = shop_store.create_goal("Checkout")
+    shop_store.ask_user("shop-dev", "Which payment provider?", goal_id=checkout.id)
+    dashboard = open_dashboard(team)
+    dashboard.open_question_window()
+
+    dashboard.project_choice.set("Web shop")
+    dashboard.project_choice.event_generate("<<ComboboxSelected>>")
+    dashboard.root.update()
+
+    assert dashboard.project == shop and dashboard.store.path == shop.db
+    assert dashboard.team.get_children() == ("shop-dev",)
+    assert dashboard.goal_id == checkout.id and "Checkout" in dashboard.conversation_title.cget("text")
+    assert list(dashboard.questions) and dashboard.question_window is None
+    assert "Web shop" in dashboard.root.title() and dashboard.workdir == tmp_path
+    assert preferences.load_project(dashboard.preferences_file) == "Web shop"
+
+    dashboard.switch_project(projects.default_project(tmp_path))
+    dashboard.root.update()
+
+    assert sorted(dashboard.team.get_children()) == ["claude", "codex"]
+    assert dashboard.questions == {}
+
+
+def test_a_new_project_starts_empty_and_is_selected(team, open_dashboard, tmp_path, monkeypatch):
+    from a2a_coop.dialogs import ProjectDraft
+
+    monkeypatch.setattr("a2a_coop.launch.ensure_default_agents", lambda store: [store.define_agent("claude", "claude", "", "")])
+    team.create_goal("Grappling hook")
+    dashboard = open_dashboard(team)
+
+    dashboard.create_project(ProjectDraft("Blog", str(tmp_path)))
+    dashboard.root.update()
+
+    assert dashboard.project.name == "Blog"
+    assert list(dashboard.project_choice.cget("values")) == ["Default", "Blog"]
+    assert dashboard.team.get_children() == ("claude",)
+    assert dashboard.goal_id is None and "No goals yet" in conversation(dashboard)

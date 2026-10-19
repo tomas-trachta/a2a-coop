@@ -8,10 +8,11 @@ from tkinter import font, messagebox, ttk
 from typing import Callable, Optional
 
 from . import events as coop_events
-from . import launch, preferences, providers, render, theme
-from .dialogs import AgentDialog, AgentDraft, GoalDialog, GoalDraft
+from . import launch, preferences, projects, providers, reading, render, theme
+from .dialogs import AgentDialog, AgentDraft, GoalDialog, GoalDraft, ProjectDialog, ProjectDraft
 from .errors import CoopError
 from .models import Agent, Goal, Message, Task
+from .question_window import QuestionsWindow
 from .store import EVENT, EVERYONE, OFFLINE, QUESTION, USER, CoopStore
 from .widgets import (
     Column,
@@ -28,8 +29,11 @@ from .widgets import (
     color_tags,
     display_lines,
     field_text,
+    focus_next,
+    focus_previous,
     is_scrolled_to_end,
     recolor_widgets,
+    replace_selection,
     scrolled_text,
     scrolled_tree,
     section_header,
@@ -44,7 +48,6 @@ from .widgets import (
 )
 
 TITLE = "a2a-coop"
-SUBTITLE = "Your agents, working together"
 REFRESH_MILLISECONDS = 1000
 NOTICE_MILLISECONDS = 10000
 STARTING_GRACE_SECONDS = 90
@@ -59,6 +62,8 @@ QUESTIONS_SHARE_WHILE_WAITING = 0.45
 TITLE_LINES = 2
 SWATCH_SIZE = 10
 SWATCH_GAP = 6
+CHAT_INDENT = 14
+CHAT_PADDING = 8
 COMPOSER_LINES = (2, 4)
 
 GENERAL_ROW = "general"
@@ -66,11 +71,12 @@ PARTICIPANT_TAG = "participant:"
 APPEARANCE_LABELS = ("Light", "Dark")
 EVERYONE_LABEL = "everyone"
 COMPOSER_HINT = "Enter to send  ·  Shift+Enter for a new line"
-SHORTCUTS_HINT = "Ctrl+G new goal  ·  Ctrl+N new agent  ·  Ctrl+R answer a question  ·  Esc message box"
+SHORTCUTS_HINT = "Ctrl+P new project  ·  Ctrl+G new goal  ·  Ctrl+N new agent  ·  Ctrl+R answer a question  ·  Esc message box"
 EMPTY_CONVERSATION_HINT = "Nothing said about this goal yet."
 EMPTY_GENERAL_HINT = "No messages without a goal yet."
 NO_GOALS_HINT = "No goals yet. Click New goal… (Ctrl+G) to give the agents one, then start them from the team list."
 NO_QUESTIONS_HINT = "No open questions. Agents will ask here when they need you."
+QUESTIONS_POPPED_OUT_HINT = "Questions are open in their own window."
 NO_AGENTS_HINT = "No agents yet. Add an agent to get started."
 NO_AGENT_SELECTED_HINT = "Select an agent to see its role and full status."
 GENERAL_DETAILS_HINT = "Select a goal to see its tasks."
@@ -143,44 +149,66 @@ class IdentityColors:
 
 
 class CoopDashboard:
-    def __init__(self, root: tk.Tk, store: CoopStore, backlog: int, workdir: Optional[Path] = None):
+    def __init__(
+        self,
+        root: tk.Tk,
+        store: CoopStore,
+        backlog: int,
+        workdir: Optional[Path] = None,
+        home: Optional[Path] = None,
+    ):
         self.root = root
         self.store = store
         self.backlog = backlog
-        self.workdir = workdir or Path.cwd()
+        self.base_workdir = workdir or Path.cwd()
+        self.home = home or store.path.parent
+        self.project = current_project(self.home, store.path)
 
+        self.answering: Optional[int] = None
+        self.question_window: Optional[QuestionsWindow] = None
+        self.full_title = ""
+        self.showing_hint = False
+        self.jobs: dict[str, str] = {}
+        self.preferences_file = preferences.preferences_path(self.home / projects.DB_FILE)
+        self.appearance = preferences.load_appearance(self.preferences_file)
+        self.palette = theme.PALETTES[self.appearance]
+        self.forget_project_state()
+
+        self.build()
+        self.bind_keys()
+        self.root.bind("<Destroy>", self.forget_jobs, add="+")
+
+        self.open_project_data()
+        self.schedule_refresh()
+
+        self.composer.focus_set()
+
+    def forget_project_state(self) -> None:
         self.last_message_id = 0
         self.agents: list[Agent] = []
         self.question_ids: Optional[tuple[int, ...]] = None
         self.questions: dict[int, Message] = {}
-        self.answering: Optional[int] = None
         self.answer_drafts: dict[int, str] = {}
         self.tasks: dict[int, Task] = {}
         self.starting: dict[str, float] = {}
         self.goal_id: Optional[int] = None
         self.unseen: dict[Optional[int], int] = {}
         self.details_key: Optional[tuple] = None
-        self.full_title = ""
-        self.showing_hint = False
         self.new_below = 0
         self.chosen_tab: Optional[ttk.Frame] = None
-        self.jobs: dict[str, str] = {}
-        self.preferences_file = preferences.preferences_path(store.path)
-        self.appearance = preferences.load_appearance(self.preferences_file)
-        self.palette = theme.PALETTES[self.appearance]
-        self.colors = IdentityColors(root, self.palette)
+        self.colors = IdentityColors(self.root, self.palette)
 
-        self.build()
-        self.bind_keys()
-        self.root.bind("<Destroy>", self.forget_jobs, add="+")
-
-        self.colors.assign([agent.name for agent in store.list_agents()])
-        self.goal_id = latest_goal_id(store)
+    def open_project_data(self) -> None:
+        self.colors.assign([agent.name for agent in self.store.list_agents()])
+        self.goal_id = latest_goal_id(self.store)
         self.load_conversation()
         self.refresh_dashboard()
-        self.schedule_refresh()
 
-        self.composer.focus_set()
+    @property
+    def workdir(self) -> Path:
+        folder = Path(self.project.folder).expanduser() if self.project.folder else None
+
+        return folder if folder is not None and folder.is_dir() else self.base_workdir
 
     def build(self) -> None:
         theme.apply_theme(self.root, self.palette)
@@ -197,7 +225,7 @@ class CoopDashboard:
         width, height = (theme.scaled(self.root, size) for size in DEFAULT_SIZE)
         min_width, min_height = (theme.scaled(self.root, size) for size in MINIMUM_SIZE)
 
-        self.root.title(TITLE)
+        self.root.title(self.window_title())
         self.root.geometry(f"{width}x{height}")
         self.root.minsize(min_width, min_height)
 
@@ -208,8 +236,10 @@ class CoopDashboard:
         menu = tk.Menu(self.root, tearoff=False)
         coop = tk.Menu(menu, tearoff=False)
 
+        coop.add_command(label="New project…", accelerator="Ctrl+P", command=self.new_project)
         coop.add_command(label="New goal…", accelerator="Ctrl+G", command=self.new_goal)
         coop.add_command(label="New agent…", accelerator="Ctrl+N", command=self.new_agent)
+        coop.add_command(label="Questions in a window", command=self.open_question_window)
         coop.add_separator()
         coop.add_command(label="Quit", accelerator="Ctrl+Q", command=self.root.quit)
 
@@ -222,11 +252,32 @@ class CoopDashboard:
         header.grid(row=0, column=0, sticky="ew")
 
         ttk.Label(header, text=TITLE, style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text=SUBTITLE, style="Subtitle.TLabel").pack(side="left", anchor="s", padx=(12, 0), pady=(0, 4))
+        self.build_project_choice(header)
 
         add_button(header, "New agent…", self.new_agent, side="right")
         add_button(header, "New goal…", self.new_goal, primary=True, side="right", padx=(0, 8))
         self.build_appearance_choice(header)
+
+    def build_project_choice(self, parent: tk.Misc) -> None:
+        ttk.Label(parent, text="Project", style="Subtitle.TLabel").pack(side="left", padx=(24, 6))
+
+        self.project_choice = ttk.Combobox(parent, state="readonly", width=22, postcommand=self.show_project_choices)
+        self.project_choice.pack(side="left")
+        self.project_choice.bind("<<ComboboxSelected>>", lambda event: self.project_selected())
+
+        add_button(parent, "New project…", self.new_project, side="left", padx=(6, 0))
+        self.show_project_choices()
+
+    def show_project_choices(self) -> None:
+        names = [project.name for project in self.known_projects()]
+
+        self.project_choice.configure(values=names)
+        self.project_choice.set(self.project.name)
+
+    def known_projects(self) -> list[projects.Project]:
+        known = projects.list_projects(self.home)
+
+        return known if self.project in known else [self.project, *known]
 
     def build_appearance_choice(self, parent: tk.Misc) -> None:
         self.appearance_choice = ttk.Combobox(parent, values=APPEARANCE_LABELS, state="readonly", width=6)
@@ -279,7 +330,7 @@ class CoopDashboard:
         return left, width - right - theme.scaled(self.root, theme.PANE_GAP)
 
     def question_sashes(self, height: int) -> tuple[int]:
-        if self.questions:
+        if self.questions and self.question_window is None:
             return (round(height * QUESTIONS_SHARE_WHILE_WAITING),)
 
         return (min(self.questions_card.winfo_reqheight(), height // 2),)
@@ -351,8 +402,9 @@ class CoopDashboard:
         frame, self.conversation = scrolled_text(parent, height=10, on_scroll=self.chat_scrolled)
         frame.pack(side="top", fill="both", expand=True, pady=(4, 0))
 
-        self.conversation.configure(padx=4, pady=4, spacing2=3)
+        self.conversation.configure(padx=CHAT_PADDING, pady=4, spacing2=3)
         configure_conversation_tags(self.conversation, self.palette)
+        reading.cap_line_length(self.conversation, ("body", "question"))
 
         self.jump_button = ttk.Button(frame, style="Jump.Primary.TButton", command=self.jump_to_latest)
 
@@ -395,12 +447,17 @@ class CoopDashboard:
 
     def build_questions(self, parent: tk.Misc) -> ttk.Frame:
         self.questions_card = card(parent)
-        _, self.questions_heading = section_header(self.questions_card, "Questions for you")
+        self.questions_header, self.questions_heading = section_header(self.questions_card, "Questions for you")
+        add_button(self.questions_header, "Pop out", self.open_question_window, side="right", padx=0)
 
         self.build_answer_area(self.questions_card)
 
         self.question_hint = wrapping_label(self.questions_card)
         self.question_hint.configure(text=NO_QUESTIONS_HINT)
+
+        self.questions_popped_out = surface(self.questions_card)
+        wrapping_label(self.questions_popped_out).configure(text=QUESTIONS_POPPED_OUT_HINT)
+        add_button(self.questions_popped_out, "Show window", self.open_question_window, side="top", anchor="w", pady=(8, 0))
 
         self.question_area = surface(self.questions_card)
         self.question_list = scrolled_tree(self.question_area, QUESTION_COLUMNS, height=2, tree_column=QUESTION_ASKER_COLUMN)
@@ -409,12 +466,12 @@ class CoopDashboard:
 
         self.question_text = TextPanel(self.question_area, height=5)
         self.question_text.frame.pack(side="top", fill="both", expand=True, pady=(10, 0))
-        configure_detail_tags(self.question_text.text, self.palette)
+        configure_question_tags(self.question_text.text, self.palette)
 
         return self.questions_card
 
     def build_answer_area(self, parent: tk.Misc) -> None:
-        area = surface(parent)
+        self.answer_area = area = surface(parent)
         area.pack(side="bottom", fill="x", pady=(10, 0))
 
         row = button_row(area, pady=(0, 6))
@@ -492,6 +549,7 @@ class CoopDashboard:
         self.goal_buttons["cancelled"].pack_configure(side="right", padx=0)
 
     def bind_keys(self) -> None:
+        bind_shortcut(self.root, "p", self.new_project)
         bind_shortcut(self.root, "g", self.new_goal)
         bind_shortcut(self.root, "n", self.new_agent)
         bind_shortcut(self.root, "r", self.focus_answer)
@@ -567,6 +625,7 @@ class CoopDashboard:
 
         if recent:
             self.show_messages(recent)
+            self.later("chat-end", None, lambda: self.conversation.yview_moveto(1.0))
         else:
             self.show_hint(self.empty_hint())
 
@@ -676,14 +735,16 @@ class CoopDashboard:
 
         return Row(str(question.id), values, (), question.sender, self.colors.swatch(question.sender))
 
-    def identity_tag(self, text: tk.Text, name: str) -> str:
+    def identity_tag(self, text: tk.Text, name: str, bold: Optional[str] = None) -> str:
         tag = f"{PARTICIPANT_TAG}{name}"
-        text.tag_configure(tag, foreground=self.colors.color(name), font=theme.BOLD_FONT)
+        defined = tag in text.tag_names()
+        bold = bold or (text.tag_cget(tag, "font") if defined else "") or theme.BOLD_FONT
+        text.tag_configure(tag, foreground=self.colors.color(name), font=bold)
 
         return tag
 
     def participant_tag(self, name: str) -> str:
-        return self.identity_tag(self.conversation, name)
+        return self.identity_tag(self.conversation, name, theme.READING_BOLD_FONT)
 
     def forget_started_agents(self, now: float) -> None:
         for agent in self.agents:
@@ -734,9 +795,12 @@ class CoopDashboard:
         select_first(self.question_list)
 
         self.mark_waiting(len(questions))
-        self.show_question_area(was_waiting)
+        self.show_question_area(was_waiting != bool(questions))
         self.show_selected_question()
         self.forget_stale_drafts()
+
+        if self.question_window is not None:
+            self.question_window.show_questions()
 
     def announce_new_questions(self, questions: list[Message]) -> None:
         if self.question_ids is None:
@@ -750,23 +814,29 @@ class CoopDashboard:
     def mark_waiting(self, count: int) -> None:
         if count:
             self.questions_heading.configure(text=f"Questions for you ({count})", style="Waiting.Heading.Card.TLabel")
-            self.root.title(f"{TITLE} · {count} question{'s' if count > 1 else ''} waiting")
+            self.root.title(f"{self.window_title()} · {count} question{'s' if count > 1 else ''} waiting")
             return
 
         self.questions_heading.configure(text="Questions for you", style="Heading.Card.TLabel")
-        self.root.title(TITLE)
+        self.root.title(self.window_title())
 
-    def show_question_area(self, was_waiting: bool) -> None:
-        waiting = bool(self.questions)
+    def window_title(self) -> str:
+        return f"{TITLE} · {self.project.name}"
 
-        if waiting:
-            self.question_hint.pack_forget()
+    def show_question_area(self, resize: bool) -> None:
+        for widget in (self.question_hint, self.question_area, self.questions_popped_out, self.answer_area):
+            widget.pack_forget()
+
+        if self.question_window is not None:
+            self.questions_popped_out.pack(side="top", fill="x")
+        elif self.questions:
+            self.answer_area.pack(side="bottom", fill="x", pady=(10, 0), after=self.questions_header)
             self.question_area.pack(side="top", fill="both", expand=True)
         else:
-            self.question_area.pack_forget()
+            self.answer_area.pack(side="bottom", fill="x", pady=(10, 0), after=self.questions_header)
             self.question_hint.pack(side="top", fill="x")
 
-        if waiting != was_waiting:
+        if resize:
             self.later("questions-sash", None, self.right_placer.reset)
 
     def selected_question(self) -> Optional[int]:
@@ -777,11 +847,13 @@ class CoopDashboard:
     def show_selected_question(self) -> None:
         question = self.questions.get(self.selected_question())
 
-        set_enabled(self.answer_box, True)
-        self.switch_answer_draft(question.id if question else None)
+        if self.question_window is None:
+            set_enabled(self.answer_box, True)
+            self.switch_answer_draft(question.id if question else None)
         asker_tag = self.identity_tag(self.question_text.text, question.sender) if question else ""
+        body = reading.body_segments(self.question_text.text, question.body) if question else []
 
-        self.question_text.show(question_details(question, asker_tag))
+        self.question_text.show(question_details(question, asker_tag, body))
 
         for widget in (self.answer_box, *self.question_buttons):
             set_enabled(widget, question is not None)
@@ -944,11 +1016,78 @@ class CoopDashboard:
             self.refresh_dashboard()
 
     def focus_answer(self) -> None:
+        if self.question_window is not None:
+            self.question_window.present()
+            return
+
         if not self.questions:
             self.notify("No questions are waiting for you.")
             return
 
         self.answer_box.focus_set()
+
+    def open_question_window(self) -> None:
+        if self.question_window is not None:
+            self.question_window.present()
+            return
+
+        self.switch_answer_draft(None)
+        self.question_window = QuestionsWindow(self, self.selected_question())
+        self.show_question_area(resize=True)
+
+    def question_window_closed(self, selected: Optional[int]) -> None:
+        self.question_window = None
+
+        if selected is not None:
+            select_only(self.question_list, str(selected))
+
+        self.show_question_area(resize=True)
+        self.show_selected_question()
+
+    def new_project(self) -> ProjectDialog:
+        return ProjectDialog(self.root, self.create_project, self.base_workdir)
+
+    def create_project(self, draft: ProjectDraft) -> None:
+        folder = providers.normalize_workdir(draft.folder)
+        project = projects.add_project(self.home, draft.name, folder)
+        added = launch.ensure_default_agents(CoopStore(project.db))
+
+        self.switch_project(project)
+        self.notify(f"Created project {project.name}" + (f" with {', '.join(agent.name for agent in added)}." if added else "."))
+
+    def project_selected(self) -> None:
+        name = self.project_choice.get()
+        project = next((project for project in self.known_projects() if project.name == name), None)
+
+        if project is not None:
+            self.attempt(lambda: self.switch_project(project))
+
+    def switch_project(self, project: projects.Project) -> None:
+        if project == self.project:
+            return
+
+        store = CoopStore(project.db)
+
+        if self.question_window is not None:
+            self.question_window.destroy()
+            self.question_window = None
+
+        self.store, self.project = store, project
+        self.forget_project_state()
+        self.switch_answer_draft(None)
+        self.answer_drafts.clear()
+        self.remember_project()
+
+        self.show_project_choices()
+        self.show_question_area(resize=True)
+        self.open_project_data()
+        self.notify(f"Switched to project {project.name}.")
+
+    def remember_project(self) -> None:
+        try:
+            preferences.save_project(self.preferences_file, self.project.name)
+        except OSError:
+            self.notify("Could not remember the chosen project for next time.", error=True)
 
     def new_goal(self) -> GoalDialog:
         return GoalDialog(self.root, self.create_goal)
@@ -1094,12 +1233,17 @@ class CoopDashboard:
         for detail in self.detail_texts():
             configure_detail_tags(detail, self.palette)
 
+        configure_question_tags(self.question_text.text, self.palette)
+
         for widget in (self.conversation, *self.detail_texts()):
             self.recolor_identity_tags(widget)
 
         color_tags(self.team, presence_colors(self.palette))
         color_tags(self.goal_list, goal_status_colors(self.palette))
         self.task_list.tag_configure("done", foreground=self.palette.secondary)
+
+        if self.question_window is not None:
+            self.question_window.recolor()
 
     def recolor_identity_tags(self, text: tk.Text) -> None:
         for tag in text.tag_names():
@@ -1112,6 +1256,10 @@ class CoopDashboard:
 
     def clear_notice(self) -> None:
         self.notice.configure(text=SHORTCUTS_HINT, style="Status.TLabel")
+
+
+def current_project(home: Path, db: Path) -> projects.Project:
+    return projects.project_for_db(home, db) or projects.Project(str(db), db)
 
 
 def side_widths(width: int, narrowest: int, widest: int) -> tuple[int, int]:
@@ -1148,11 +1296,11 @@ def appearance_label(appearance: str) -> str:
 def configure_conversation_tags(text: tk.Text, palette: theme.Palette) -> None:
     text.tag_configure("hint", foreground=palette.secondary)
     text.tag_configure("muted", foreground=palette.secondary)
-    text.tag_configure("entry", spacing1=12)
+    text.tag_configure("entry", spacing1=18)
     text.tag_configure("event", foreground=palette.secondary, lmargin2=event_indent())
     text.tag_configure("event-more", lmargin1=event_indent())
-    text.tag_configure("body", lmargin1=12, lmargin2=12, spacing1=4)
-    text.tag_configure("question", background=palette.question_background, lmargin1=12, lmargin2=12, rmargin=4)
+    text.tag_configure("question", background=palette.question_background, lmargin1=CHAT_INDENT, lmargin2=CHAT_INDENT)
+    reading.configure_reading_tags(text, palette, indent=CHAT_INDENT)
     text.tag_configure("question-mark", foreground=palette.warning, font=theme.BOLD_FONT)
 
 
@@ -1162,27 +1310,14 @@ def configure_detail_tags(text: tk.Text, palette: theme.Palette) -> None:
     text.tag_configure("paragraph", spacing1=8)
 
 
+def configure_question_tags(text: tk.Text, palette: theme.Palette) -> None:
+    configure_detail_tags(text, palette)
+    reading.configure_reading_tags(text, palette, large=False)
+    text.tag_configure("lead", spacing3=6)
+
+
 def event_indent() -> int:
     return font.nametofont(theme.TEXT_FONT).measure(f"{render.clock(0)}  •  ")
-
-
-def replace_selection(text: tk.Text, content: str) -> None:
-    if text.tag_ranges("sel") and text.compare("sel.first", "<=", "insert") and text.compare("sel.last", ">=", "insert"):
-        text.delete("sel.first", "sel.last")
-
-    text.insert("insert", content)
-
-
-def focus_next(widget: tk.Misc) -> str:
-    widget.tk_focusNext().focus_set()
-
-    return "break"
-
-
-def focus_previous(widget: tk.Misc) -> str:
-    widget.tk_focusPrev().focus_set()
-
-    return "break"
 
 
 def bind_shortcut(root: tk.Tk, key: str, action: Callable[[], object]) -> None:
@@ -1222,7 +1357,8 @@ def append_chat_header(text: tk.Text, message: Message, participant_tag: Callabl
 def append_chat_body(text: tk.Text, message: Message) -> None:
     tags = ("body", "question") if message.kind == QUESTION else ("body",)
 
-    append_text(text, message.body.strip() + "\n", tags)
+    for content, segment_tags in reading.body_segments(text, message.body, tags):
+        append_text(text, content, segment_tags)
 
 
 def participant_label(name: str) -> str:
@@ -1260,18 +1396,20 @@ def agent_details(agent: Optional[Agent], has_agents: bool, name_tag: str) -> tu
     )
 
 
-def question_details(question: Optional[Message], asker_tag: str) -> tuple[Segment, ...]:
+def question_details(question: Optional[Message], asker_tag: str, body: list[Segment]) -> tuple[Segment, ...]:
     if question is None:
         return ()
 
-    where = f"Goal #{question.goal_id}" if question.goal_id is not None else "General"
-
     return (
-        (f"#{question.id} · ", ("muted",)),
-        (question.sender, (asker_tag,)),
-        (f" asks · {where} · {render.clock(question.created_at)}", ("muted",)),
-        (f"\n{question.body.strip()}", ("paragraph",)),
+        (f"#{question.id} · ", ("muted", "lead")),
+        (question.sender, (asker_tag, "lead")),
+        (f" asks · {question_scope(question)} · {render.clock(question.created_at)}\n", ("muted", "lead")),
+        *body,
     )
+
+
+def question_scope(question: Message) -> str:
+    return f"Goal #{question.goal_id}" if question.goal_id is not None else "General"
 
 
 def new_messages_label(count: int) -> str:
@@ -1411,8 +1549,8 @@ def run(root: tk.Tk) -> None:
     root.destroy()
 
 
-def watch(store: CoopStore, backlog: int) -> None:
+def watch(store: CoopStore, backlog: int, home: Optional[Path] = None) -> None:
     root = open_window()
-    CoopDashboard(root, store, backlog)
+    CoopDashboard(root, store, backlog, home=home)
 
     run(root)

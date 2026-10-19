@@ -55,6 +55,24 @@ Agents started from the dashboard get their coop connection on the command line 
 Code, `-c` overrides for Codex), so they work even without `setup`. Claude Code may ask once whether you trust
 the agent's working directory; answer it in the agent's window.
 
+## Projects
+
+A project is a separate coop with its own team, goals, conversation and questions. Pick one in the **Project**
+box at the top of the dashboard and its team appears; **New project…** (Ctrl+P) creates one, with an optional
+folder its agents start in, and adds a Claude and a Codex agent if they are installed. The dashboard reopens the
+project you used last. Everything you had before projects lives on as the **Default** project.
+
+```bash
+a2a-coop project add "Web shop" --dir ~/code/shop    # its own team (claude, codex), goals and conversation
+a2a-coop project list                                # every project with its team
+a2a-coop --project "Web shop" agent add -p claude -r "code reviewer"
+a2a-coop --project "Web shop" goal add "Checkout"    # every command takes --project
+a2a-coop --project "Web shop"                        # open the dashboard on it
+```
+
+Each project keeps its data in `~/.a2a_coop/projects/<name>/coop.db`; agents started from the dashboard are
+connected to the project that is open. An agent's name only has to be unique within its project.
+
 ## Agents
 
 An agent is a name plus a provider (`claude` or `codex`), an optional role and a working directory. Make as many
@@ -76,7 +94,7 @@ a2a-coop agent rm claude-tests
 
 The name defaults to provider plus role (`claude-code-reviewer`). The role is shown to teammates and put in the
 agent's own instructions, so a reviewer reviews and leaves the implementation to others. With no working
-directory set, an agent starts in the directory you opened the dashboard from.
+directory set, an agent starts in its project's folder, or else in the directory you opened the dashboard from.
 
 Where the window opens:
 
@@ -97,6 +115,10 @@ bar and shows the number of waiting questions in the window title.
 - Select a question in the list, type into the answer box and press Enter (or **Answer**); **Ctrl+R** jumps
   to the answer box.
 - **Dismiss** closes the selected question without answering it.
+- **Pop out** (or **Coop → Questions in a window**) opens the questions in their own large, resizable window:
+  the list on the left, the full question on the right and a multi-line answer box (Enter answers, Shift+Enter
+  starts a new line, Esc closes). Half-typed answers move along with it. While it is open the panel in the
+  dashboard shrinks, giving **Goal details** the room, and Ctrl+R brings the window to the front.
 
 From the CLI: `a2a-coop questions`, `a2a-coop answer 12 "use SQLite"`, `a2a-coop dismiss 12`.
 
@@ -175,7 +197,7 @@ a2a-coop reset --yes               # wipe all agents, goals, tasks and messages
 ### The dashboard
 
 `a2a-coop` (or `a2a-coop watch`) opens the dashboard window: three resizable columns under a header with
-**Appearance**, **New goal…** and **New agent…**. **Appearance** switches between a light and a dark look right
+**Project**, **Appearance**, **New goal…** and **New agent…**. **Appearance** switches between a light and a dark look right
 away; the choice is remembered in `ui.json` next to the coop database (`~/.a2a_coop/ui.json` by default). The
 window title bar, the menu bar on Windows and the system file and confirmation dialogs keep the operating
 system's look.
@@ -191,8 +213,11 @@ system's look.
   the chat.
 - **Conversation** (center): the chat of the open goal, newest at the bottom, color-coded per participant;
   questions for you are highlighted. The header shows the goal, its status and task progress. The dashboard
-  opens on the latest open goal. `-n 100` loads more history (default 50). While you read older messages the
-  chat stays put, and a **N new messages ↓** button jumps to the latest ones.
+  opens on the latest open goal, scrolled to the newest message. `-n 100` loads more history (default 50).
+  While you read older messages the chat stays put, and a **N new messages ↓** button jumps to the latest ones.
+  Messages are formatted for reading: lists with hanging indents, headings, **bold**, `inline code` and
+  fenced code blocks, which are syntax-highlighted when they name their language. Long lines wrap at a
+  comfortable reading width on wide windows.
 - **Message box** (under the chat): says which goal your message goes to ("Message about Goal #3"). Enter
   sends, Shift+Enter starts a new line; the box grows up to four lines. Pick the recipient under **To**
   (everyone, or one agent).
@@ -205,9 +230,10 @@ system's look.
 
 | Key | Action |
 | --- | --- |
+| Ctrl+P | new project (and open it) |
 | Ctrl+G | new goal (and open it) |
 | Ctrl+N | new agent |
-| Ctrl+R | answer the selected question |
+| Ctrl+R | answer the selected question (or bring the questions window to the front) |
 | Enter / Shift+Enter | send the message / new line in the message box |
 | Esc | back to the message box |
 | Ctrl+Q | quit |
@@ -231,6 +257,10 @@ Every goal, task and message change is broadcast to the agents, so a listening a
 | `list_agents`, `set_status` | See the team; tell everyone what you are doing. |
 | `send_message`, `read_messages`, `wait_for_messages`, `message_history` | Talk to a teammate, `all`, or `user`; block until something arrives. |
 | `ask_user` | Ask the human a question; it is pinned in the dashboard and the answer arrives as a message. |
+
+Messages may use Markdown. To share code, `send_message` and `ask_user` take an optional `code` snippet and its
+`language` (e.g. `python`, `kotlin`, `sql`); the snippet is attached below the text as a fenced block, so
+teammates read it as plain Markdown and the dashboard shows it syntax-highlighted.
 | `list_goals`, `get_goal` | Goals you set, with their tasks. |
 | `create_task`, `claim_task`, `update_task`, `list_tasks` | Split goals into tasks, claim them atomically, report results. |
 
@@ -244,10 +274,12 @@ agent, or `/mcp` reconnect in Claude Code).
 
 ## Configuration
 
-- `--db PATH` or `A2A_COOP_DB` selects the coop database. Agents and the CLI must use the same one;
-  `a2a-coop setup` pins the path explicitly in the generated configs.
-- The dashboard keeps its own settings (currently the light/dark appearance) in `ui.json` next to the coop
-  database. It is local to your machine and never shared with the agents.
+- `--db PATH` or `A2A_COOP_DB` selects the coop database, `--project NAME` a project's. Agents and the CLI
+  must use the same one; `a2a-coop setup` pins the path explicitly in the generated configs
+  (`a2a-coop --project NAME setup` for a project).
+- Projects are listed in `projects.json` next to the default coop database.
+- The dashboard keeps its own settings (the light/dark appearance and the last project) in `ui.json` next to
+  the default coop database. It is local to your machine and never shared with the agents.
 - Roles are set per agent (`agent add/set --role`). `serve --role` overrides it for one run.
 - Agent names are free-form (`claude`, `codex`, `claude-2`, ...); `user` and `all` are reserved.
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 FILE_NAME = "ui.json"
 APPEARANCE_KEY = "appearance"
+PROJECT_KEY = "project"
 APPEARANCES = ("light", "dark")
 DEFAULT_APPEARANCE = "light"
 
@@ -24,6 +25,16 @@ def save_appearance(path: Path, appearance: str) -> None:
         raise ValueError(f"Unknown appearance {appearance!r}.")
 
     write_atomically(path, {**read_preferences(path), APPEARANCE_KEY: appearance})
+
+
+def load_project(path: Path) -> str:
+    project = read_preferences(path).get(PROJECT_KEY)
+
+    return project if isinstance(project, str) else ""
+
+
+def save_project(path: Path, project: str) -> None:
+    write_atomically(path, {**read_preferences(path), PROJECT_KEY: project})
 
 
 def read_preferences(path: Path) -> dict:
