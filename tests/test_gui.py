@@ -1094,3 +1094,112 @@ def test_selection_shows_over_highlighted_rows(team, open_dashboard):
 
     assert priority[-1] == "sel"
     assert {"question", "body-code-block"} <= set(priority)
+
+
+@pytest.fixture
+def two_teams(team):
+    team.create_team("Review crew")
+    team.define_agent("reviewer", "claude", team="Review crew")
+
+    return team
+
+
+def pick_team(dashboard: CoopDashboard, team: str) -> None:
+    dashboard.team_choice.set(team)
+    dashboard.team_choice.event_generate("<<ComboboxSelected>>")
+    dashboard.root.update()
+
+
+def test_picking_a_team_shows_its_agents_and_scopes_broadcasts(two_teams, open_dashboard):
+    dashboard = open_dashboard(two_teams)
+    before = dashboard.team.get_children()
+
+    pick_team(dashboard, "Review crew")
+    send(dashboard, EVERYONE_LABEL, "reviewers, take over")
+
+    assert list(dashboard.team_choice.cget("values")) == ["Main", "Review crew"]
+    assert before == ("claude", "codex") and dashboard.team.get_children() == ("reviewer",)
+    assert list(dashboard.recipient.cget("values")) == [EVERYONE_LABEL, "reviewer"]
+    assert [message.body for message in two_teams.take_unread("reviewer")] == ["reviewers, take over"]
+    assert two_teams.take_unread("codex") == []
+    assert preferences.load_team(dashboard.preferences_file, "Default") == "Review crew"
+
+
+def test_the_last_team_is_reopened(two_teams, open_dashboard):
+    preferences.save_team(two_teams.path.parent / "ui.json", "Default", "Review crew")
+
+    dashboard = open_dashboard(two_teams)
+
+    assert dashboard.team_choice.get() == "Review crew"
+    assert dashboard.team.get_children() == ("reviewer",)
+
+
+def test_new_agents_join_the_open_team(two_teams, open_dashboard, tmp_path):
+    from a2a_coop.dialogs import AgentDraft
+
+    dashboard = open_dashboard(two_teams)
+    pick_team(dashboard, "Review crew")
+
+    dashboard.create_agent(AgentDraft("tester", "codex", "", str(tmp_path), False))
+
+    assert two_teams.get_agent("tester").team == "Review crew"
+    assert dashboard.team.get_children() == ("reviewer", "tester")
+
+
+def test_team_dialog_creates_and_opens_a_team(team, open_dashboard, monkeypatch):
+    from a2a_coop import providers
+
+    monkeypatch.setattr("a2a_coop.providers.installed_providers", lambda: [providers.PROVIDERS["claude"]])
+    dashboard = open_dashboard(team)
+
+    dialog = dashboard.new_team()
+    dialog.team_name.set("Review crew")
+    dialog.submit()
+    with_agents = dashboard.team.get_children()
+
+    dialog = dashboard.new_team()
+    dialog.team_name.set("Spare")
+    dialog.with_agents.set(False)
+    dialog.submit()
+
+    assert with_agents == ("claude-review-crew",)
+    assert dashboard.team_name == "Spare" and dashboard.team.get_children() == ()
+    assert team.list_teams() == ["Main", "Review crew", "Spare"]
+
+
+def test_team_dialog_requires_a_new_name(team, open_dashboard):
+    dashboard = open_dashboard(team)
+    dialog = dashboard.new_team()
+
+    dialog.submit()
+    empty = dialog.error.cget("text")
+    dialog.team_name.set("main")
+    dialog.submit()
+
+    assert empty == "Give the team a name."
+    assert "already exists" in dialog.error.cget("text")
+
+
+def test_removing_the_open_team_asks_and_falls_back(two_teams, open_dashboard, monkeypatch):
+    dashboard = open_dashboard(two_teams)
+    asked = []
+    monkeypatch.setattr(dashboard, "confirm", lambda question: asked.append(question) or True)
+    pick_team(dashboard, "Review crew")
+
+    dashboard.remove_current_team()
+    dashboard.remove_current_team()
+
+    assert asked == ["Remove team Review crew and its agents reviewer? Goals, tasks and the conversation stay."]
+    assert dashboard.team_choice.get() == "Main" and dashboard.team.get_children() == ("claude", "codex")
+    assert "only team" in dashboard.notice.cget("text")
+
+
+def test_a_team_removed_elsewhere_falls_back_to_the_first(two_teams, open_dashboard):
+    dashboard = open_dashboard(two_teams)
+    pick_team(dashboard, "Review crew")
+
+    two_teams.remove_team("Review crew")
+    dashboard.refresh_dashboard()
+
+    assert dashboard.team_choice.get() == "Main"
+    assert dashboard.team.get_children() == ("claude", "codex")

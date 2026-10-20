@@ -13,6 +13,7 @@ class Agent:
     provider: str = ""
     workdir: str = ""
     current_goal_id: Optional[int] = None
+    team: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,3 +49,4 @@ class Message:
     created_at: float
     handled_at: Optional[float] = None
     goal_id: Optional[int] = None
+    team: Optional[str] = None

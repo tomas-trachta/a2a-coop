@@ -73,6 +73,28 @@ a2a-coop --project "Web shop"                        # open the dashboard on it
 Each project keeps its data in `~/.a2a_coop/projects/<name>/coop.db`; agents started from the dashboard are
 connected to the project that is open. An agent's name only has to be unique within its project.
 
+## Teams
+
+A project can have several teams that take turns on the same goals. Every agent belongs to one team; goals,
+tasks, the conversation and your questions stay shared by the whole project. Agents only see their own team:
+`get_briefing` and `list_agents` show teammates only, a message to `all` reaches their team and you, and they
+cannot message another team's agents. Every project starts with one team called **Main**.
+
+```bash
+a2a-coop team add "Review crew"                      # adds claude-review-crew and codex-review-crew
+a2a-coop team add Spare --empty                      # no agents
+a2a-coop team list                                   # every team with its agents
+a2a-coop agent add -p claude -r tester --team "Review crew"
+a2a-coop agent set claude-tester --team Main         # move an agent
+a2a-coop team rm "Review crew"                       # removes the team and its agents
+```
+
+In the dashboard, the box above the team list switches teams and **New team…** next to it creates one (with a
+Claude and a Codex agent if you keep the box checked). **Coop → Remove team…** removes the open team and its
+agents. New agents join the open team, your messages to everyone reach only that team, and the dashboard
+reopens the team you used last in each project. Without `--team`, a new agent made from the CLI joins the
+project's first team, and your messages to `all` from the CLI reach every team.
+
 ## Agents
 
 An agent is a name plus a provider (`claude` or `codex`), an optional role and a working directory. Make as many
@@ -138,7 +160,7 @@ all of this for any agent, in the current terminal.
 ### Overview
 
 ```bash
-a2a-coop status                    # agents, open goals with their tasks, your unread count
+a2a-coop status                    # teams and agents, open goals with their tasks, your unread count
 a2a-coop watch                     # the dashboard window (see below); --stream follows messages here
 ```
 
@@ -189,7 +211,7 @@ a2a-coop log --goal 2              # one goal's conversation
 ### Maintenance
 
 ```bash
-a2a-coop agents                    # all agents, presence, status
+a2a-coop agents                    # all agents by team, presence, status
 a2a-coop kick claude-2             # remove an agent (same as `agent rm`)
 a2a-coop reset --yes               # wipe all agents, goals, tasks and messages
 ```
@@ -205,7 +227,7 @@ system's look.
 - **Goals** (left, top): open goals, each with a "● N" badge when it got messages while you were looking
   elsewhere. Paused and closed goals say so in front of the title ("Paused · #2 …"). Click a goal to open it;
   messages that belong to no goal are under **General**. **Show closed** also lists done and cancelled goals.
-- **Team** (left, bottom): every agent with its live presence (green = listening, orange = busy or starting,
+- **Team** (left, bottom): the open team (switch it in the box above the list) and its agents with their live presence (green = listening, orange = busy or starting,
   red = not seen for 2+ minutes, grey = offline). Below the list, the selected agent's provider, role, working
   directory and full status. Double-click an agent (or **Start**) to start it; starting one that is already
   running asks before opening another copy. **Add…** and **Remove…** sit next to **Start**. Every agent gets

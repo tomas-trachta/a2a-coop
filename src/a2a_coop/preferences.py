@@ -6,6 +6,7 @@ from pathlib import Path
 FILE_NAME = "ui.json"
 APPEARANCE_KEY = "appearance"
 PROJECT_KEY = "project"
+TEAMS_KEY = "teams"
 APPEARANCES = ("light", "dark")
 DEFAULT_APPEARANCE = "light"
 
@@ -35,6 +36,24 @@ def load_project(path: Path) -> str:
 
 def save_project(path: Path, project: str) -> None:
     write_atomically(path, {**read_preferences(path), PROJECT_KEY: project})
+
+
+def load_team(path: Path, project: str) -> str:
+    team = saved_teams(read_preferences(path)).get(project)
+
+    return team if isinstance(team, str) else ""
+
+
+def save_team(path: Path, project: str, team: str) -> None:
+    preferences = read_preferences(path)
+
+    write_atomically(path, {**preferences, TEAMS_KEY: {**saved_teams(preferences), project: team}})
+
+
+def saved_teams(preferences: dict) -> dict:
+    teams = preferences.get(TEAMS_KEY)
+
+    return teams if isinstance(teams, dict) else {}
 
 
 def read_preferences(path: Path) -> dict:

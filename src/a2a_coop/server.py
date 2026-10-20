@@ -5,7 +5,7 @@ import anyio
 from mcp.server.mcpserver import MCPServer
 
 from . import events, markup, protocol, render
-from .models import Message
+from .models import Agent, Message
 from .store import ACTIVE, EVENT, OFFLINE, WAITING, CoopStore
 
 DEFAULT_WAIT_SECONDS = 45
@@ -44,10 +44,10 @@ def register_team_tools(server: MCPServer, store: CoopStore, agent: str) -> None
 
     @server.tool(structured_output=False)
     def list_agents() -> str:
-        """List every agent in the coop with its role, presence and current status."""
+        """List the agents on your team with their role, presence and current status."""
         store.touch_agent(agent)
 
-        return render.agents(store.list_agents(), time.time())
+        return render.agents(teammates(store, agent), time.time())
 
     @server.tool(structured_output=False)
     def set_status(status: str) -> str:
@@ -60,7 +60,7 @@ def register_team_tools(server: MCPServer, store: CoopStore, agent: str) -> None
 def register_message_tools(server: MCPServer, store: CoopStore, agent: str) -> None:
     @server.tool(structured_output=False)
     def send_message(to: str, message: str, goal_id: Optional[int] = None, code: str = "", language: str = "") -> str:
-        """Send a message. `to` is a teammate's name, "all" for every agent plus the user, or "user" for the human operator. goal_id files it under that goal's conversation; leave it empty to use the goal you are working on. To share a code snippet, put it in `code` (and its language, e.g. "python" or "kotlin", in `language`): it is attached below the message and syntax-highlighted in the user's dashboard. To ask the user something that needs a decision, use ask_user instead."""
+        """Send a message. `to` is a teammate's name, "all" for your whole team plus the user, or "user" for the human operator. goal_id files it under that goal's conversation; leave it empty to use the goal you are working on. To share a code snippet, put it in `code` (and its language, e.g. "python" or "kotlin", in `language`): it is attached below the message and syntax-highlighted in the user's dashboard. To ask the user something that needs a decision, use ask_user instead."""
         store.touch_agent(agent)
         body = with_snippet(message, code, language)
         sent = store.send_message(agent, to, body, goal_id=resolve_goal(store, agent, goal_id))
@@ -206,7 +206,7 @@ def agent_role(store: CoopStore, agent: str) -> str:
 def briefing(store: CoopStore, agent: str) -> str:
     sections = [
         protocol.instructions_for(agent, agent_role(store, agent)),
-        render.section("Team", render.agents(store.list_agents(), time.time())),
+        render.section(f"Your team ({store.get_agent(agent).team})", render.agents(teammates(store, agent), time.time())),
         render.section("Open goals", render.goals(store.list_goals())),
         render.section("Your open tasks", render.tasks(store.list_tasks(assignee=agent, include_done=False))),
         current_goal_line(store, agent),
@@ -214,6 +214,10 @@ def briefing(store: CoopStore, agent: str) -> str:
     ]
 
     return "\n\n".join(sections)
+
+
+def teammates(store: CoopStore, agent: str) -> list[Agent]:
+    return store.list_agents(store.get_agent(agent).team)
 
 
 def current_goal_line(store: CoopStore, agent: str) -> str:

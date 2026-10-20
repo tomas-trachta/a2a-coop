@@ -243,6 +243,102 @@ def test_old_databases_are_migrated(tmp_path):
     store = CoopStore(path)
 
     assert store.get_agent("claude").provider == ""
+    assert store.get_agent("claude").team == "Main" and store.list_teams() == ["Main"]
     assert store.open_questions() == []
     assert [message.body for message in store.goal_messages(1)] == ["user set a new goal #1: Hook", "claude claimed task #1: Rope"]
     assert [message.body for message in store.goal_messages(None)] == ["old news"]
+
+
+@pytest.fixture
+def two_teams(team):
+    team.create_team("Review crew")
+    team.define_agent("reviewer", "claude", team="review crew")
+
+    return team
+
+
+def test_a_new_coop_has_one_team_its_agents_join(team):
+    assert team.list_teams() == ["Main"]
+    assert {agent.team for agent in team.list_agents()} == {"Main"}
+
+
+@pytest.mark.parametrize("name", ["", "   ", "main", "x" * 41])
+def test_invalid_or_duplicate_team_names_are_refused(store, name):
+    with pytest.raises(CoopError):
+        store.create_team(name)
+
+
+def test_teams_are_listed_in_creation_order_and_found_by_any_case(store):
+    store.create_team("Review  crew")
+    store.create_team("Alpha")
+
+    assert store.list_teams() == ["Main", "Review crew", "Alpha"]
+    assert store.get_team("review CREW") == "Review crew"
+
+    with pytest.raises(CoopError, match="Teams: Main, Review crew, Alpha"):
+        store.get_team("Beta")
+
+
+def test_each_team_lists_only_its_own_agents(two_teams):
+    assert [agent.name for agent in two_teams.list_agents("Main")] == ["claude", "codex"]
+    assert [agent.name for agent in two_teams.list_agents("Review crew")] == ["reviewer"]
+    assert len(two_teams.list_agents()) == 3
+
+
+def test_agent_broadcasts_reach_only_their_team_and_the_user(two_teams):
+    two_teams.send_message("claude", EVERYONE, "main team only")
+    two_teams.send_message("reviewer", EVERYONE, "review crew only")
+
+    assert [message.body for message in two_teams.take_unread("codex")] == ["main team only"]
+    assert [message.body for message in two_teams.take_unread("reviewer")] == []
+    assert [message.body for message in two_teams.take_unread(USER)] == ["main team only", "review crew only"]
+    assert two_teams.take_unread("claude") == []
+
+
+def test_user_broadcasts_reach_every_team_unless_one_is_named(two_teams):
+    two_teams.send_message(USER, EVERYONE, "everybody")
+    two_teams.send_message(USER, EVERYONE, "reviewers", team="review crew")
+
+    assert [message.body for message in two_teams.take_unread("codex")] == ["everybody"]
+    assert [message.body for message in two_teams.take_unread("reviewer")] == ["everybody", "reviewers"]
+
+
+def test_agents_cannot_message_another_team(two_teams):
+    with pytest.raises(CoopError, match="on team Review crew"):
+        two_teams.send_message("claude", "reviewer", "psst")
+
+    two_teams.send_message(USER, "reviewer", "hello")
+
+    assert len(two_teams.take_unread("reviewer")) == 1
+
+
+def test_agents_can_move_to_another_team(two_teams):
+    moved = two_teams.update_agent("codex", team="REVIEW CREW")
+
+    assert moved.team == "Review crew"
+    assert [agent.name for agent in two_teams.list_agents("Review crew")] == ["codex", "reviewer"]
+
+
+def test_removing_a_team_removes_its_agents(two_teams):
+    removed = two_teams.remove_team("review crew")
+
+    assert [agent.name for agent in removed] == ["reviewer"]
+    assert two_teams.list_teams() == ["Main"]
+    assert [agent.name for agent in two_teams.list_agents()] == ["claude", "codex"]
+
+
+def test_the_last_team_cannot_be_removed(store):
+    with pytest.raises(CoopError, match="only team"):
+        store.remove_team("Main")
+
+
+def test_new_agents_join_the_first_team_and_reset_keeps_one(store):
+    store.create_team("Review crew")
+    store.remove_team("Main")
+    store.register_agent("claude", "")
+
+    assert store.get_agent("claude").team == "Review crew"
+
+    store.reset()
+
+    assert store.list_teams() == ["Main"]

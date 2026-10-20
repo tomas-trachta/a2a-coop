@@ -9,7 +9,18 @@ from typing import Callable, Optional
 
 from . import events as coop_events
 from . import launch, markup, preferences, projects, providers, reading, render, theme
-from .dialogs import AgentDialog, AgentDraft, CodeDialog, CodeDraft, GoalDialog, GoalDraft, ProjectDialog, ProjectDraft
+from .dialogs import (
+    AgentDialog,
+    AgentDraft,
+    CodeDialog,
+    CodeDraft,
+    GoalDialog,
+    GoalDraft,
+    ProjectDialog,
+    ProjectDraft,
+    TeamDialog,
+    TeamDraft,
+)
 from .errors import CoopError
 from .models import Agent, Goal, Message, Task
 from .question_window import QuestionsWindow
@@ -189,6 +200,7 @@ class CoopDashboard:
 
     def forget_project_state(self) -> None:
         self.last_message_id = 0
+        self.team_name = ""
         self.agents: list[Agent] = []
         self.question_ids: Optional[tuple[int, ...]] = None
         self.questions: dict[int, Message] = {}
@@ -204,6 +216,8 @@ class CoopDashboard:
 
     def open_project_data(self) -> None:
         self.colors.assign([agent.name for agent in self.store.list_agents()])
+        self.team_name = self.remembered_team()
+        self.show_team_choices()
         self.goal_id = latest_goal_id(self.store)
         self.load_conversation()
         self.refresh_dashboard()
@@ -242,6 +256,8 @@ class CoopDashboard:
 
         coop.add_command(label="New project…", accelerator="Ctrl+P", command=self.new_project)
         coop.add_command(label="New goal…", accelerator="Ctrl+G", command=self.new_goal)
+        coop.add_command(label="New team…", command=self.new_team)
+        coop.add_command(label="Remove team…", command=self.remove_current_team)
         coop.add_command(label="New agent…", accelerator="Ctrl+N", command=self.new_agent)
         coop.add_command(label="Questions in a window", command=self.open_question_window)
         coop.add_separator()
@@ -360,6 +376,8 @@ class CoopDashboard:
         self.team_count = ttk.Label(header, style="Muted.Card.TLabel")
         self.team_count.pack(side="right")
 
+        self.build_team_choice(frame)
+
         buttons = button_row(frame, side="bottom")
         self.start_button = add_button(buttons, "Start", self.start_selected_agent)
         add_button(buttons, "Add…", self.new_agent)
@@ -378,6 +396,20 @@ class CoopDashboard:
         self.team.bind("<Return>", lambda event: self.start_selected_agent())
 
         return frame
+
+    def build_team_choice(self, parent: tk.Misc) -> None:
+        row = surface(parent)
+        row.pack(side="top", fill="x", pady=(0, 8))
+
+        add_button(row, "New team…", self.new_team, side="right", padx=(6, 0))
+
+        self.team_choice = ttk.Combobox(row, state="readonly", width=8, postcommand=self.show_team_choices)
+        self.team_choice.pack(side="left", fill="x", expand=True)
+        self.team_choice.bind("<<ComboboxSelected>>", lambda event: self.team_selected())
+
+    def show_team_choices(self) -> None:
+        self.team_choice.configure(values=self.store.list_teams())
+        self.team_choice.set(self.team_name)
 
     def build_conversation(self, parent: tk.Misc) -> ttk.Frame:
         frame = card(parent)
@@ -599,7 +631,8 @@ class CoopDashboard:
         self.receive(self.store.messages_after(self.last_message_id))
         self.store.take_unread(USER)
 
-        self.agents = self.store.list_agents()
+        self.forget_removed_team()
+        self.agents = self.store.list_agents(self.team_name)
 
         self.show_team()
         self.show_recipients()
@@ -611,6 +644,13 @@ class CoopDashboard:
         if self.goal_id is not None and self.current_goal() is None:
             self.goal_id = None
             self.load_conversation()
+
+    def forget_removed_team(self) -> None:
+        teams = self.store.list_teams()
+
+        if self.team_name not in teams:
+            self.team_name = teams[0]
+            self.show_team_choices()
 
     def current_goal(self) -> Optional[Goal]:
         if self.goal_id is None:
@@ -977,7 +1017,7 @@ class CoopDashboard:
         if not body:
             return
 
-        if self.attempt(lambda: self.store.send_message(USER, recipient, body, goal_id=self.goal_id)):
+        if self.attempt(lambda: self.store.send_message(USER, recipient, body, goal_id=self.goal_id, team=self.team_name)):
             self.clear_composer()
             self.refresh_dashboard()
 
@@ -1106,11 +1146,60 @@ class CoopDashboard:
         except OSError:
             self.notify("Could not remember the chosen project for next time.", error=True)
 
+    def remembered_team(self) -> str:
+        teams = self.store.list_teams()
+        team = preferences.load_team(self.preferences_file, self.project.name)
+
+        return team if team in teams else teams[0]
+
+    def new_team(self) -> TeamDialog:
+        return TeamDialog(self.root, self.create_team)
+
+    def create_team(self, draft: TeamDraft) -> None:
+        team = self.store.create_team(draft.name)
+        added = launch.add_team_agents(self.store, team) if draft.with_agents else []
+
+        self.switch_team(team)
+        self.notify(f"Created team {team}" + (f" with {', '.join(agent.name for agent in added)}." if added else "."))
+
+    def team_selected(self) -> None:
+        self.switch_team(self.team_choice.get())
+
+    def switch_team(self, team: str) -> None:
+        if team == self.team_name:
+            return
+
+        self.team_name = team
+        self.remember_team()
+        self.show_team_choices()
+        self.refresh_dashboard()
+        self.notify(f"Switched to team {team}.")
+
+    def remember_team(self) -> None:
+        try:
+            preferences.save_team(self.preferences_file, self.project.name, self.team_name)
+        except OSError:
+            self.notify("Could not remember the chosen team for next time.", error=True)
+
+    def remove_current_team(self) -> None:
+        team = self.team_name
+
+        if len(self.store.list_teams()) == 1:
+            self.notify(f"{team} is the only team of this project.", error=True)
+            return
+
+        if not self.confirm(remove_team_question(team, self.agents)):
+            return
+
+        if self.attempt(lambda: self.store.remove_team(team)):
+            self.notify(f"Removed team {team}.")
+            self.refresh_dashboard()
+
     def new_goal(self) -> GoalDialog:
         return GoalDialog(self.root, self.create_goal)
 
     def new_agent(self) -> AgentDialog:
-        taken = {agent.name for agent in self.agents}
+        taken = {agent.name for agent in self.store.list_agents()}
 
         return AgentDialog(self.root, self.create_agent, taken, self.workdir)
 
@@ -1122,7 +1211,7 @@ class CoopDashboard:
 
     def create_agent(self, draft: AgentDraft) -> None:
         workdir = providers.normalize_workdir(draft.workdir)
-        self.store.define_agent(draft.name, draft.provider, draft.role, workdir)
+        self.store.define_agent(draft.name, draft.provider, draft.role, workdir, self.team_name)
 
         self.notify(f"Added agent {draft.name}.")
         self.refresh_dashboard()
@@ -1273,6 +1362,12 @@ class CoopDashboard:
 
     def clear_notice(self) -> None:
         self.notice.configure(text=SHORTCUTS_HINT, style="Status.TLabel")
+
+
+def remove_team_question(team: str, agents: list[Agent]) -> str:
+    members = f" and its agents {', '.join(agent.name for agent in agents)}" if agents else ""
+
+    return f"Remove team {team}{members}? Goals, tasks and the conversation stay."
 
 
 def current_project(home: Path, db: Path) -> projects.Project:
