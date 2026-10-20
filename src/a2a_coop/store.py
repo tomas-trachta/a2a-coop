@@ -25,8 +25,10 @@ OFFLINE = "offline"
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 BUSY_TIMEOUT_SECONDS = 10
+DEFAULT_TEAM = "Main"
+MAX_TEAM_NAME_LENGTH = 40
 
-SCHEMA = """
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS agents (
     name TEXT PRIMARY KEY,
     role TEXT NOT NULL,
@@ -36,7 +38,13 @@ CREATE TABLE IF NOT EXISTS agents (
     last_seen REAL NOT NULL,
     provider TEXT NOT NULL DEFAULT '',
     workdir TEXT NOT NULL DEFAULT '',
-    current_goal_id INTEGER
+    current_goal_id INTEGER,
+    team TEXT NOT NULL DEFAULT '{DEFAULT_TEAM}'
+);
+
+CREATE TABLE IF NOT EXISTS teams (
+    name TEXT PRIMARY KEY COLLATE NOCASE,
+    created_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS goals (
@@ -68,7 +76,8 @@ CREATE TABLE IF NOT EXISTS messages (
     kind TEXT NOT NULL DEFAULT 'chat',
     created_at REAL NOT NULL,
     handled_at REAL,
-    goal_id INTEGER
+    goal_id INTEGER,
+    team TEXT
 );
 
 CREATE TABLE IF NOT EXISTS cursors (
@@ -90,16 +99,18 @@ ADDED_COLUMNS = {
         "provider": "TEXT NOT NULL DEFAULT ''",
         "workdir": "TEXT NOT NULL DEFAULT ''",
         "current_goal_id": "INTEGER",
+        "team": f"TEXT NOT NULL DEFAULT '{DEFAULT_TEAM}'",
     },
     "messages": {
         "handled_at": "REAL",
         "goal_id": "INTEGER",
+        "team": "TEXT",
     },
 }
 
 UPSERT_AGENT = """
-INSERT INTO agents (name, role, status, activity, joined_at, last_seen)
-VALUES (?, ?, '', 'active', ?, ?)
+INSERT INTO agents (name, role, status, activity, joined_at, last_seen, team)
+VALUES (?, ?, '', 'active', ?, ?, ?)
 ON CONFLICT(name) DO UPDATE SET
     role = CASE WHEN excluded.role != '' THEN excluded.role ELSE agents.role END,
     activity = 'active',
@@ -111,9 +122,10 @@ INSERT INTO cursors (reader, last_read_id) VALUES (?, ?)
 ON CONFLICT(reader) DO UPDATE SET last_read_id = excluded.last_read_id
 """
 
-UNREAD_MESSAGES = """
+UNREAD_MESSAGES = f"""
 SELECT * FROM messages
-WHERE id > ? AND sender != ? AND recipient IN (?, ?)
+WHERE id > ? AND sender != ?
+    AND (recipient = ? OR (recipient = '{EVERYONE}' AND (? IS NULL OR team IS NULL OR team = ?)))
 ORDER BY id
 """
 
@@ -129,9 +141,11 @@ ORDER BY id
 """
 
 INSERT_AGENT = """
-INSERT INTO agents (name, role, status, activity, joined_at, last_seen, provider, workdir)
-VALUES (?, ?, '', 'offline', ?, ?, ?, ?)
+INSERT INTO agents (name, role, status, activity, joined_at, last_seen, provider, workdir, team)
+VALUES (?, ?, '', 'offline', ?, ?, ?, ?, ?)
 """
+
+ENSURE_A_TEAM = "INSERT INTO teams (name, created_at) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM teams)"
 
 GOAL_MESSAGES = """
 SELECT * FROM (
@@ -162,7 +176,7 @@ class CoopStore:
         now = time.time()
 
         with self._connect() as connection:
-            connection.execute(UPSERT_AGENT, (name, role.strip(), now, now))
+            connection.execute(UPSERT_AGENT, (name, role.strip(), now, now, self.default_team()))
             connection.execute(
                 "INSERT OR IGNORE INTO cursors (reader, last_read_id) VALUES (?, ?)",
                 (name, self._latest_message_id(connection)),
@@ -170,9 +184,17 @@ class CoopStore:
 
         return self.get_agent(name)
 
-    def define_agent(self, name: str, provider: str, role: str = "", workdir: str = "") -> Agent:
+    def define_agent(
+        self,
+        name: str,
+        provider: str,
+        role: str = "",
+        workdir: str = "",
+        team: str = "",
+    ) -> Agent:
         validate_agent_name(name)
         require_text(provider, "Provider")
+        team = self.get_team(team) if team else self.default_team()
 
         if self._fetch_one("SELECT name FROM agents WHERE name = ?", (name,)) is not None:
             raise CoopError(f"An agent named {name!r} already exists.")
@@ -180,7 +202,7 @@ class CoopStore:
         now = time.time()
 
         with self._connect() as connection:
-            connection.execute(INSERT_AGENT, (name, role.strip(), now, now, provider.strip(), workdir.strip()))
+            connection.execute(INSERT_AGENT, (name, role.strip(), now, now, provider.strip(), workdir.strip(), team))
             connection.execute(
                 "INSERT OR IGNORE INTO cursors (reader, last_read_id) VALUES (?, ?)",
                 (name, self._latest_message_id(connection)),
@@ -194,6 +216,7 @@ class CoopStore:
         role: Optional[str] = None,
         provider: Optional[str] = None,
         workdir: Optional[str] = None,
+        team: Optional[str] = None,
     ) -> Agent:
         self.get_agent(name)
         changes = {
@@ -202,8 +225,11 @@ class CoopStore:
             if value is not None
         }
 
+        if team is not None:
+            changes["team"] = self.get_team(team)
+
         if not changes:
-            raise CoopError("Nothing to update: pass a role, provider or working directory.")
+            raise CoopError("Nothing to update: pass a role, provider, working directory or team.")
 
         assignments = ", ".join(f"{column} = ?" for column in changes)
         self._execute(f"UPDATE agents SET {assignments} WHERE name = ?", (*changes.values(), name))
@@ -218,8 +244,13 @@ class CoopStore:
 
         return Agent(**row)
 
-    def list_agents(self) -> list[Agent]:
-        return [Agent(**row) for row in self._fetch_all("SELECT * FROM agents ORDER BY name")]
+    def list_agents(self, team: Optional[str] = None) -> list[Agent]:
+        if team is None:
+            return [Agent(**row) for row in self._fetch_all("SELECT * FROM agents ORDER BY name")]
+
+        rows = self._fetch_all("SELECT * FROM agents WHERE team = ? ORDER BY name", (self.get_team(team),))
+
+        return [Agent(**row) for row in rows]
 
     def touch_agent(self, name: str, activity: str = ACTIVE) -> None:
         self._execute(
@@ -239,12 +270,51 @@ class CoopStore:
         self.get_agent(name)
 
         with self._connect() as connection:
-            connection.execute("DELETE FROM agents WHERE name = ?", (name,))
-            connection.execute("DELETE FROM cursors WHERE reader = ?", (name,))
-            connection.execute(
-                "UPDATE messages SET handled_at = ? WHERE recipient = ? AND sender = ? AND handled_at IS NULL",
-                (time.time(), USER, name),
-            )
+            delete_agent(connection, name)
+
+    def list_teams(self) -> list[str]:
+        return [row["name"] for row in self._fetch_all("SELECT name FROM teams ORDER BY created_at, rowid")]
+
+    def default_team(self) -> str:
+        return self.list_teams()[0]
+
+    def get_team(self, name: str) -> str:
+        row = self._fetch_one("SELECT name FROM teams WHERE name = ?", (" ".join(name.split()),))
+
+        if row is None:
+            raise CoopError(f"There is no team called {name!r}. Teams: {', '.join(self.list_teams())}.")
+
+        return row["name"]
+
+    def create_team(self, name: str) -> str:
+        name = " ".join(name.split())
+        require_text(name, "Team name")
+
+        if len(name) > MAX_TEAM_NAME_LENGTH:
+            raise CoopError(f"Keep the team name under {MAX_TEAM_NAME_LENGTH} characters.")
+
+        if self._fetch_one("SELECT name FROM teams WHERE name = ?", (name,)) is not None:
+            raise CoopError(f"A team called {name!r} already exists.")
+
+        self._execute("INSERT INTO teams (name, created_at) VALUES (?, ?)", (name, time.time()))
+
+        return name
+
+    def remove_team(self, name: str) -> list[Agent]:
+        team = self.get_team(name)
+
+        if len(self.list_teams()) == 1:
+            raise CoopError(f"{team} is the only team. Create another one before removing it.")
+
+        members = self.list_agents(team)
+
+        with self._connect() as connection:
+            for agent in members:
+                delete_agent(connection, agent.name)
+
+            connection.execute("DELETE FROM teams WHERE name = ?", (team,))
+
+        return members
 
     def create_goal(self, title: str, description: str = "") -> Goal:
         require_text(title, "Goal title")
@@ -404,16 +474,18 @@ class CoopStore:
         body: str,
         kind: str = CHAT,
         goal_id: Optional[int] = None,
+        team: str = "",
     ) -> Message:
         require_text(body, "Message")
         self._require_recipient(recipient, sender)
+        audience = self._audience(sender, team)
 
         if goal_id is not None:
             self.get_goal(goal_id)
 
         cursor = self._execute(
-            "INSERT INTO messages (sender, recipient, body, kind, created_at, goal_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (sender, recipient, body.strip(), kind, time.time(), goal_id),
+            "INSERT INTO messages (sender, recipient, body, kind, created_at, goal_id, team) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sender, recipient, body.strip(), kind, time.time(), goal_id, audience),
         )
 
         return self.get_message(cursor.lastrowid)
@@ -497,8 +569,10 @@ class CoopStore:
 
     def reset(self) -> None:
         with self._connect() as connection:
-            for table in ("messages", "tasks", "goals", "cursors", "agents", "sqlite_sequence"):
+            for table in ("messages", "tasks", "goals", "cursors", "agents", "teams", "sqlite_sequence"):
                 connection.execute(f"DELETE FROM {table}")
+
+            connection.execute(ENSURE_A_TEAM, (DEFAULT_TEAM, time.time()))
 
     def _create_schema(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -508,6 +582,7 @@ class CoopStore:
             connection.executescript(SCHEMA)
             add_missing_columns(connection)
             connection.execute(GOAL_INDEX)
+            connection.execute(ENSURE_A_TEAM, (DEFAULT_TEAM, time.time()))
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -546,8 +621,20 @@ class CoopStore:
 
     def _unread_rows(self, connection: sqlite3.Connection, reader: str) -> list[sqlite3.Row]:
         last_read_id = self._last_read_id(connection, reader)
+        team = self._team_of(reader)
 
-        return connection.execute(UNREAD_MESSAGES, (last_read_id, reader, reader, EVERYONE)).fetchall()
+        return connection.execute(UNREAD_MESSAGES, (last_read_id, reader, reader, team, team)).fetchall()
+
+    def _team_of(self, name: str) -> Optional[str]:
+        row = self._fetch_one("SELECT team FROM agents WHERE name = ?", (name,))
+
+        return row["team"] if row is not None else None
+
+    def _audience(self, sender: str, team: str) -> Optional[str]:
+        if sender != USER:
+            return self._team_of(sender)
+
+        return self.get_team(team) if team else None
 
     def _open_question(self, message_id: int) -> Message:
         message = self.get_message(message_id)
@@ -576,8 +663,14 @@ class CoopStore:
         if recipient == sender:
             raise CoopError("You cannot send a message to yourself.")
 
-        if recipient not in (USER, EVERYONE):
-            self.get_agent(recipient)
+        if recipient in (USER, EVERYONE):
+            return
+
+        team = self.get_agent(recipient).team
+        sender_team = self._team_of(sender)
+
+        if sender_team is not None and sender_team != team:
+            raise CoopError(f"{recipient} is on team {team}, not on yours ({sender_team}). Message your own team or the user.")
 
     def _claim_refusal(self, task_id: int) -> str:
         task = self.get_task(task_id)
@@ -621,6 +714,15 @@ def add_missing_columns(connection: sqlite3.Connection) -> None:
 
             if backfill:
                 backfill(connection)
+
+
+def delete_agent(connection: sqlite3.Connection, name: str) -> None:
+    connection.execute("DELETE FROM agents WHERE name = ?", (name,))
+    connection.execute("DELETE FROM cursors WHERE reader = ?", (name,))
+    connection.execute(
+        "UPDATE messages SET handled_at = ? WHERE recipient = ? AND sender = ? AND handled_at IS NULL",
+        (time.time(), USER, name),
+    )
 
 
 def mark_old_messages_handled(connection: sqlite3.Connection) -> None:

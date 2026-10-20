@@ -135,3 +135,17 @@ async def test_code_snippets_are_attached_as_fenced_blocks(team):
     sent = [message.body for message in team.recent_messages() if message.sender == "claude"]
 
     assert sent == [f"Try this:\n\n```python\n{snippet}\n```", "Run it?\n\n```bash\nmake test\n```"]
+
+
+async def test_agents_only_see_their_own_team(team):
+    team.create_team("Review crew")
+    team.define_agent("reviewer", "claude", team="Review crew")
+
+    async with Client(build_server(team, "reviewer")) as reviewer:
+        briefing = text_of(await reviewer.call_tool("get_briefing", {}))
+        listed = text_of(await reviewer.call_tool("list_agents", {}))
+        refused = await reviewer.call_tool("send_message", {"to": "claude", "message": "hi"})
+
+    assert "Your team (Review crew):" in briefing
+    assert [line.split()[0] for line in listed.splitlines()] == ["reviewer"]
+    assert refused.is_error and "on team Main" in text_of(refused)
