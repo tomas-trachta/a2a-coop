@@ -52,3 +52,15 @@ def test_unknown_appearance_is_not_saved(tmp_path):
         preferences.save_appearance(tmp_path / "ui.json", "sepia")
 
     assert not (tmp_path / "ui.json").exists()
+
+
+def test_the_chosen_team_is_kept_per_project(tmp_path):
+    path = tmp_path / "ui.json"
+    preferences.save_project(path, "Shop")
+    preferences.save_team(path, "Shop", "Review crew")
+    preferences.save_team(path, "Default", "Main")
+
+    assert preferences.load_team(path, "Shop") == "Review crew"
+    assert preferences.load_team(path, "Default") == "Main"
+    assert preferences.load_team(path, "Blog") == ""
+    assert preferences.load_project(path) == "Shop"

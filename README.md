@@ -89,8 +89,11 @@ a2a-coop agent set claude-tester --team Main         # move an agent
 a2a-coop team rm "Review crew"                       # removes the team and its agents
 ```
 
-Without `--team`, a new agent joins the project's first team. Your own messages to `all` from the CLI reach
-every team.
+In the dashboard, the box above the team list switches teams and **New team…** next to it creates one (with a
+Claude and a Codex agent if you keep the box checked). **Coop → Remove team…** removes the open team and its
+agents. New agents join the open team, your messages to everyone reach only that team, and the dashboard
+reopens the team you used last in each project. Without `--team`, a new agent made from the CLI joins the
+project's first team, and your messages to `all` from the CLI reach every team.
 
 ## Agents
 
@@ -224,7 +227,7 @@ system's look.
 - **Goals** (left, top): open goals, each with a "● N" badge when it got messages while you were looking
   elsewhere. Paused and closed goals say so in front of the title ("Paused · #2 …"). Click a goal to open it;
   messages that belong to no goal are under **General**. **Show closed** also lists done and cancelled goals.
-- **Team** (left, bottom): every agent with its live presence (green = listening, orange = busy or starting,
+- **Team** (left, bottom): the open team (switch it in the box above the list) and its agents with their live presence (green = listening, orange = busy or starting,
   red = not seen for 2+ minutes, grey = offline). Below the list, the selected agent's provider, role, working
   directory and full status. Double-click an agent (or **Start**) to start it; starting one that is already
   running asks before opening another copy. **Add…** and **Remove…** sit next to **Start**. Every agent gets

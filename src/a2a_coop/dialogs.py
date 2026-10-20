@@ -27,6 +27,12 @@ class ProjectDraft:
 
 
 @dataclass(frozen=True)
+class TeamDraft:
+    name: str
+    with_agents: bool
+
+
+@dataclass(frozen=True)
 class CodeDraft:
     language: str
     code: str
@@ -281,6 +287,35 @@ class ProjectDialog(Dialog):
             return None
 
         return ProjectDraft(name, self.folder.get().strip())
+
+
+class TeamDialog(Dialog):
+    def __init__(self, parent: tk.Misc, accept: Callable[[TeamDraft], None]):
+        super().__init__(parent, "New team", accept)
+        labels = [provider.label for provider in providers.installed_providers()]
+        self.team_name = tk.StringVar(self)
+        self.with_agents = tk.BooleanVar(self, value=bool(labels))
+
+        name_entry = self.add_entry("Name", self.team_name, first=True)
+
+        if labels:
+            check = ttk.Checkbutton(self.body, text=f"Add a {' and a '.join(labels)} agent", variable=self.with_agents)
+            check.pack(anchor="w", pady=(12, 0))
+
+        self.add_hint("The team works on the project's goals. Its agents only see each other.", above=False)
+        self.add_buttons("Create team")
+
+        self.bind("<Return>", lambda event: self.submit())
+        self.show(name_entry)
+
+    def draft(self) -> Optional[TeamDraft]:
+        name = self.team_name.get().strip()
+
+        if not name:
+            self.show_error("Give the team a name.")
+            return None
+
+        return TeamDraft(name, self.with_agents.get())
 
 
 def add_folder_choice(dialog: Dialog, variable: tk.StringVar) -> None:
