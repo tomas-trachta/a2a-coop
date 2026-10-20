@@ -83,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_serve_command(commands)
     add_overview_commands(commands)
     add_project_commands(commands)
+    add_team_commands(commands)
     add_agent_commands(commands)
     add_goal_commands(commands)
     add_task_commands(commands)
@@ -121,6 +122,24 @@ def add_project_commands(commands: argparse._SubParsersAction) -> None:
     listing.set_defaults(handler=list_projects)
 
 
+def add_team_commands(commands: argparse._SubParsersAction) -> None:
+    team = commands.add_parser("team", help="create, list and remove the teams of a project").add_subparsers(
+        dest="team_command", metavar="ACTION", required=True
+    )
+
+    add = team.add_parser("add", help="create a team that works on the project's goals with its own agents")
+    add.add_argument("name")
+    add.add_argument("--empty", action="store_true", help="do not add a Claude and a Codex agent to it")
+    add.set_defaults(handler=add_team)
+
+    listing = team.add_parser("list", help="list teams with their agents")
+    listing.set_defaults(handler=list_teams)
+
+    remove = team.add_parser("remove", aliases=["rm"], help="remove a team together with its agents")
+    remove.add_argument("name")
+    remove.set_defaults(handler=remove_team)
+
+
 def add_agent_commands(commands: argparse._SubParsersAction) -> None:
     agent = commands.add_parser("agent", help="create, start and manage agents").add_subparsers(
         dest="agent_command", required=True, metavar="ACTION"
@@ -131,17 +150,19 @@ def add_agent_commands(commands: argparse._SubParsersAction) -> None:
     add.add_argument("--provider", "-p", choices=list(providers.PROVIDERS), default="claude")
     add.add_argument("--role", "-r", default="", help='what it does, e.g. "code reviewer"')
     add.add_argument("--dir", dest="workdir", default="", help="working directory (default: where you start it)")
+    add.add_argument("--team", "-t", default="", help="team it joins (default: the project's first team)")
     add.add_argument("--start", action="store_true", help="start it in a new terminal right away")
     add.set_defaults(handler=add_agent)
 
     listing = agent.add_parser("list", help="list agents")
     listing.set_defaults(handler=show_agents)
 
-    edit = agent.add_parser("set", help="change an agent's role, provider or working directory")
+    edit = agent.add_parser("set", help="change an agent's role, provider, working directory or team")
     edit.add_argument("name")
     edit.add_argument("--provider", "-p", choices=list(providers.PROVIDERS))
     edit.add_argument("--role", "-r")
     edit.add_argument("--dir", dest="workdir")
+    edit.add_argument("--team", "-t", help="move it to another team")
     edit.set_defaults(handler=edit_agent)
 
     start = agent.add_parser("start", help="start an agent in a new terminal window (or here with --here)")
@@ -283,7 +304,7 @@ def run_server(store: CoopStore, args: argparse.Namespace) -> None:
 
 
 def show_status(store: CoopStore, args: argparse.Namespace) -> None:
-    print(render.section("Agents", render.agents(store.list_agents(), time.time())))
+    print(render.section("Teams", teams_overview(store)))
     print()
     print(render.section("Open goals", open_goals_overview(store)))
     print()
@@ -316,14 +337,41 @@ def list_projects(store: CoopStore, args: argparse.Namespace) -> None:
         print(f"{project.name}{folder}: {team or 'no agents yet'}")
 
 
+def add_team(store: CoopStore, args: argparse.Namespace) -> None:
+    team = store.create_team(args.name)
+    added = [] if args.empty else launch.add_team_agents(store, team)
+
+    print(f"Created team {team}" + (f" with agents {', '.join(agent.name for agent in added)}." if added else "."))
+
+
+def list_teams(store: CoopStore, args: argparse.Namespace) -> None:
+    for team in store.list_teams():
+        members = ", ".join(agent.name for agent in store.list_agents(team))
+
+        print(f"{team}: {members or 'no agents yet'}")
+
+
+def remove_team(store: CoopStore, args: argparse.Namespace) -> None:
+    team = store.get_team(args.name)
+    removed = store.remove_team(team)
+
+    print(f"Removed team {team}" + (f" and its agents {', '.join(agent.name for agent in removed)}." if removed else "."))
+
+
 def show_agents(store: CoopStore, args: argparse.Namespace) -> None:
-    print(render.agents(store.list_agents(), time.time()))
+    print(teams_overview(store))
+
+
+def teams_overview(store: CoopStore) -> str:
+    now = time.time()
+
+    return "\n".join(render.section(team, render.agents(store.list_agents(team), now)) for team in store.list_teams())
 
 
 def add_agent(store: CoopStore, args: argparse.Namespace) -> None:
     taken = {agent.name for agent in store.list_agents()}
     name = args.name or providers.suggested_name(args.provider, args.role, taken)
-    agent = store.define_agent(name, args.provider, args.role, providers.normalize_workdir(args.workdir))
+    agent = store.define_agent(name, args.provider, args.role, providers.normalize_workdir(args.workdir), args.team)
 
     print(f"Added {render.agent_line(agent, time.time())}")
 
@@ -335,7 +383,7 @@ def add_agent(store: CoopStore, args: argparse.Namespace) -> None:
 
 def edit_agent(store: CoopStore, args: argparse.Namespace) -> None:
     workdir = providers.normalize_workdir(args.workdir) if args.workdir is not None else None
-    agent = store.update_agent(args.name, role=args.role, provider=args.provider, workdir=workdir)
+    agent = store.update_agent(args.name, role=args.role, provider=args.provider, workdir=workdir, team=args.team)
 
     print(render.agent_line(agent, time.time()))
 

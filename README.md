@@ -73,6 +73,25 @@ a2a-coop --project "Web shop"                        # open the dashboard on it
 Each project keeps its data in `~/.a2a_coop/projects/<name>/coop.db`; agents started from the dashboard are
 connected to the project that is open. An agent's name only has to be unique within its project.
 
+## Teams
+
+A project can have several teams that take turns on the same goals. Every agent belongs to one team; goals,
+tasks, the conversation and your questions stay shared by the whole project. Agents only see their own team:
+`get_briefing` and `list_agents` show teammates only, a message to `all` reaches their team and you, and they
+cannot message another team's agents. Every project starts with one team called **Main**.
+
+```bash
+a2a-coop team add "Review crew"                      # adds claude-review-crew and codex-review-crew
+a2a-coop team add Spare --empty                      # no agents
+a2a-coop team list                                   # every team with its agents
+a2a-coop agent add -p claude -r tester --team "Review crew"
+a2a-coop agent set claude-tester --team Main         # move an agent
+a2a-coop team rm "Review crew"                       # removes the team and its agents
+```
+
+Without `--team`, a new agent joins the project's first team. Your own messages to `all` from the CLI reach
+every team.
+
 ## Agents
 
 An agent is a name plus a provider (`claude` or `codex`), an optional role and a working directory. Make as many
@@ -138,7 +157,7 @@ all of this for any agent, in the current terminal.
 ### Overview
 
 ```bash
-a2a-coop status                    # agents, open goals with their tasks, your unread count
+a2a-coop status                    # teams and agents, open goals with their tasks, your unread count
 a2a-coop watch                     # the dashboard window (see below); --stream follows messages here
 ```
 
@@ -189,7 +208,7 @@ a2a-coop log --goal 2              # one goal's conversation
 ### Maintenance
 
 ```bash
-a2a-coop agents                    # all agents, presence, status
+a2a-coop agents                    # all agents by team, presence, status
 a2a-coop kick claude-2             # remove an agent (same as `agent rm`)
 a2a-coop reset --yes               # wipe all agents, goals, tasks and messages
 ```

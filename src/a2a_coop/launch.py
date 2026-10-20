@@ -40,3 +40,15 @@ def ensure_default_agents(store) -> list[Agent]:
         return []
 
     return [store.define_agent(provider.name, provider.name) for provider in providers.installed_providers()]
+
+
+def add_team_agents(store, team: str) -> list[Agent]:
+    taken = {agent.name for agent in store.list_agents()}
+    added = []
+
+    for provider in providers.installed_providers():
+        agent = store.define_agent(providers.suggested_name(provider.name, team, taken), provider.name, team=team)
+        taken.add(agent.name)
+        added.append(agent)
+
+    return added

@@ -1,3 +1,4 @@
+from a2a_coop import providers
 from a2a_coop.cli import main
 from a2a_coop.store import CoopStore
 
@@ -79,3 +80,26 @@ def test_projects_keep_their_own_team_and_goals(tmp_path, capsys, monkeypatch):
     assert CoopStore(db).list_agents() == [] and CoopStore(db).list_goals() == []
     assert f"Web shop  ({tmp_path}): codex-shop-dev" in output
     assert "Default: no agents yet" in output
+
+
+def test_teams_from_the_cli(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("a2a_coop.providers.installed_providers", lambda: [providers.PROVIDERS["claude"]])
+    db = tmp_path / "coop.db"
+    run(db, "team", "add", "Review crew")
+    run(db, "team", "add", "Spare", "--empty")
+    run(db, "agent", "add", "tester", "--team", "review crew")
+    run(db, "agent", "add", "builder")
+    run(db, "agent", "set", "builder", "--team", "Spare")
+    run(db, "team", "list")
+    run(db, "agent", "list")
+    run(db, "team", "rm", "review crew")
+
+    store = CoopStore(db)
+    output = capsys.readouterr().out
+
+    assert "Created team Review crew with agents claude-review-crew." in output
+    assert "Review crew: claude-review-crew, tester" in output and "Main: no agents yet" in output
+    assert "Spare:\n  builder" in output
+    assert "Removed team Review crew and its agents claude-review-crew, tester." in output
+    assert store.list_teams() == ["Main", "Spare"]
+    assert [agent.name for agent in store.list_agents()] == ["builder"]
